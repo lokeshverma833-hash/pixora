@@ -20,6 +20,7 @@ import { Dropzone } from '../common/Dropzone';
 import { BeforeAfterSlider } from '../common/BeforeAfterSlider';
 import { AiConfigAlert } from '../ai/AiConfigAlert';
 import { AiInpaintCanvas } from '../ai/AiInpaintCanvas';
+import { InlineAlert } from '../common/InlineAlert';
 import {
   checkAiServerStatus,
   fileToBase64,
@@ -30,6 +31,8 @@ import {
   requestAiBackgroundBlur,
   requestAiUnblur,
   AiConfigurationError,
+  AiRateLimitError,
+  AiServiceUnavailableError,
 } from '../../services/aiService';
 import {
   applyAiEnhancement,
@@ -45,17 +48,72 @@ interface AiToolsViewProps {
   tool: ToolItem;
 }
 
+const ENHANCER_LOCAL_PRESETS = {
+  balanced: {
+    brightness: 1.05,
+    contrast: 1.10,
+    saturation: 1.05,
+    sharpness: 1.25,
+    warmth: 0,
+    vibrance: 1.08,
+    highlights: -5,
+    shadows: 8,
+  },
+  portrait: {
+    brightness: 1.08,
+    contrast: 1.06,
+    saturation: 1.02,
+    sharpness: 1.15,
+    warmth: 4,
+    vibrance: 1.05,
+    highlights: -8,
+    shadows: 12,
+  },
+  vibrant: {
+    brightness: 1.04,
+    contrast: 1.15,
+    saturation: 1.20,
+    sharpness: 1.30,
+    warmth: 2,
+    vibrance: 1.25,
+    highlights: -10,
+    shadows: 6,
+  },
+  clarity: {
+    brightness: 1.02,
+    contrast: 1.18,
+    saturation: 0.98,
+    sharpness: 1.50,
+    warmth: -2,
+    vibrance: 1.04,
+    highlights: -12,
+    shadows: 14,
+  },
+};
+
+export const TOOLS_WITH_LOCAL_FALLBACK = new Set([
+  'ai-enhancer',
+  'image-upscaler',
+  'image-unblur',
+]);
+
 export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressStage, setProgressStage] = useState<string>('');
+  const [isFallback, setIsFallback] = useState<boolean>(false);
 
   // AI Configuration State
   const [isAiConfigured, setIsAiConfigured] = useState<boolean>(true);
   const [isCheckingConfig, setIsCheckingConfig] = useState<boolean>(true);
   const [configErrorMessage, setConfigErrorMessage] = useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<{
+    message: string;
+    variant: 'warning' | 'info' | 'error';
+    canRetryAi?: boolean;
+  } | null>(null);
   const [aiInsights, setAiInsights] = useState<{ title: string; content: string } | null>(null);
 
   // Tool Specific Controls
@@ -75,6 +133,29 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
   // 6. Image Unblur
   const [unblurIntensity, setUnblurIntensity] = useState<number>(0.65);
 
+  const originalUrlRef = useRef<string | null>(null);
+  const resultRef = useRef<ProcessingResult | null>(null);
+
+  useEffect(() => {
+    originalUrlRef.current = originalUrl;
+  }, [originalUrl]);
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  // Unmount cleanup of Object URLs
+  useEffect(() => {
+    return () => {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
+    };
+  }, []);
+
   // Verify server AI configuration on mount
   const verifyConfiguration = async () => {
     setIsCheckingConfig(true);
@@ -83,7 +164,7 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
       setIsAiConfigured(status.isConfigured);
       if (!status.isConfigured) {
         setConfigErrorMessage(
-          'Gemini AI API key is not configured on the server. Please set GEMINI_API_KEY in your deployment environment secrets.'
+          'Gemini AI API key is not configured on the server. Local processing fallbacks remain available.'
         );
       } else {
         setConfigErrorMessage(null);
@@ -102,69 +183,165 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
   // Handle File selection
   const handleFile = (files: File[]) => {
     if (files.length > 0) {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
       const file = files[0];
       setSelectedFile(file);
       const url = URL.createObjectURL(file);
       setOriginalUrl(url);
       setResult(null);
       setAiInsights(null);
+      setFallbackNotice(null);
+      setConfigErrorMessage(null);
+      setIsFallback(false);
     }
   };
 
-  // Process Tool Action via Server AI Pipeline
+  const getFallbackExplanation = (err: any, opName: string): string => {
+    const is429 =
+      err instanceof AiRateLimitError ||
+      err?.status === 429 ||
+      String(err?.message || '').includes('429');
+    const is503 =
+      err instanceof AiServiceUnavailableError ||
+      err?.status === 503 ||
+      String(err?.message || '').includes('503');
+    const isConfig =
+      err instanceof AiConfigurationError ||
+      String(err?.message || '').includes('API_KEY');
+
+    if (is429) {
+      return `Gemini AI rate limit or quota exceeded (HTTP 429). Processed locally using in-browser ${opName}. Your settings and image are preserved so you can retry with AI whenever ready.`;
+    }
+    if (is503) {
+      return `Gemini AI service is temporarily experiencing high demand (HTTP 503). Processed locally using in-browser ${opName}. Your settings and image are preserved so you can retry with AI shortly.`;
+    }
+    if (isConfig) {
+      return `Gemini AI API key is not configured on the server. Processed locally using in-browser ${opName}.`;
+    }
+    return `AI service temporarily unavailable. Processed locally using in-browser ${opName}. Your settings and image are preserved so you can retry with AI.`;
+  };
+
+  const getNoFallbackExplanation = (toolName: string, err: any): string => {
+    const is429 =
+      err instanceof AiRateLimitError ||
+      err?.status === 429 ||
+      String(err?.message || '').includes('429');
+    const is503 =
+      err instanceof AiServiceUnavailableError ||
+      err?.status === 503 ||
+      String(err?.message || '').includes('503');
+    const isConfig =
+      err instanceof AiConfigurationError ||
+      String(err?.message || '').includes('API_KEY');
+
+    if (is429) {
+      return `Gemini AI rate limit or quota exceeded (HTTP 429). ${toolName} requires neural processing and has no true local equivalent. Your uploaded image and settings have been preserved so you can retry in a moment.`;
+    }
+    if (is503) {
+      return `Gemini AI service is temporarily experiencing high demand (HTTP 503). ${toolName} requires neural processing and has no true local equivalent. Your uploaded image and settings have been preserved so you can retry shortly.`;
+    }
+    if (isConfig) {
+      return `Gemini AI API key is not configured on the server. ${toolName} requires server-side neural processing and cannot be simulated locally. Please configure GEMINI_API_KEY in your deployment environment secrets.`;
+    }
+    return `The AI service is temporarily unavailable. ${toolName} requires neural processing and has no true local equivalent. Your uploaded image and settings have been preserved so you can retry.`;
+  };
+
+  // Process Tool Action via Server AI Pipeline with graceful fallback
   const handleProcess = async () => {
     if (!selectedFile) return;
 
-    // Strict configuration check: Do not execute fake processing if unconfigured
-    if (!isAiConfigured) {
+    // Strict validation for tools requiring user inputs
+    if (tool.id === 'object-remover' && !maskCanvas) {
+      setConfigErrorMessage('Please paint over the object you want to remove on the image before processing.');
+      return;
+    }
+
+    // If AI is not configured and tool has no genuine local fallback, inform user without fake processing
+    if (!isAiConfigured && !TOOLS_WITH_LOCAL_FALLBACK.has(tool.id)) {
       setConfigErrorMessage(
-        'Cannot process: Gemini AI API key is not configured on the server. Please set GEMINI_API_KEY in your deployment secrets.'
+        `${tool.name} requires server-side neural processing. Because no true local equivalent exists, a configured GEMINI_API_KEY secret is required. Your uploaded image and current settings have been preserved.`
       );
       return;
     }
 
     setIsProcessing(true);
     setConfigErrorMessage(null);
-    setProgressStage('Encoding image for neural model...');
+    setFallbackNotice(null);
+    setProgressStage('Encoding image for processing...');
+
+    let usedLocalFallback = false;
+    let fallbackMessage = '';
+    let res: ProcessingResult | null = null;
 
     try {
       const base64 = await fileToBase64(selectedFile);
-      let res: ProcessingResult | null = null;
 
       switch (tool.id) {
-        // 1. AI Photo Enhancer
+        // 1. AI Photo Enhancer (GENUINE LOCAL FALLBACK: Photographic tone curves & unsharp clarity)
         case 'ai-enhancer': {
-          setProgressStage('Analyzing multi-spectral exposure and dynamic range...');
-          const aiResponse = await requestAiEnhance(base64, selectedFile.type);
+          let enhanceParams = ENHANCER_LOCAL_PRESETS[enhancerPreset];
 
-          setAiInsights({
-            title: 'Neural Exposure Diagnosis',
-            content: aiResponse.analysis || 'Analyzed dynamic range, lifted shadow detail, and balanced color vibrancy.',
-          });
+          if (isAiConfigured) {
+            try {
+              setProgressStage('Querying Gemini model for exposure diagnosis...');
+              const aiResponse = await requestAiEnhance(base64, selectedFile.type);
+              enhanceParams = {
+                brightness: aiResponse.brightness || enhanceParams.brightness,
+                contrast: aiResponse.contrast || enhanceParams.contrast,
+                saturation: aiResponse.saturation || enhanceParams.saturation,
+                sharpness: aiResponse.sharpness || enhanceParams.sharpness,
+                warmth: aiResponse.warmth ?? enhanceParams.warmth,
+                vibrance: aiResponse.vibrance || enhanceParams.vibrance,
+                highlights: aiResponse.highlights ?? enhanceParams.highlights,
+                shadows: aiResponse.shadows ?? enhanceParams.shadows,
+              };
+              setAiInsights({
+                title: 'Neural Exposure Diagnosis',
+                content: aiResponse.analysis || 'Analyzed dynamic range, lifted shadow detail, and balanced color vibrancy.',
+              });
+              setIsFallback(false);
+            } catch (aiErr: any) {
+              console.warn('AI enhancement service unavailable, executing local algorithm fallback:', aiErr);
+              usedLocalFallback = true;
+              fallbackMessage = getFallbackExplanation(
+                aiErr,
+                `${enhancerPreset} color curves, shadow recovery, and unsharp masking`
+              );
+              setAiInsights({
+                title: 'Local Algorithmic Optimization (AI Unavailable)',
+                content: `Applied high-precision ${enhancerPreset} tone curves, shadow recovery, and unsharp masking locally in your browser. (AI service was unavailable).`,
+              });
+              setIsFallback(true);
+            }
+          } else {
+            usedLocalFallback = true;
+            fallbackMessage = `AI API key not configured on server. Applied high-precision local ${enhancerPreset} color curves and unsharp masking.`;
+            setAiInsights({
+              title: 'Local Algorithmic Optimization',
+              content: `Applied high-precision ${enhancerPreset} tone curves, shadow recovery, and unsharp masking locally in your browser.`,
+            });
+            setIsFallback(true);
+          }
 
           setProgressStage('Applying tonal curves and clarity enhancements...');
-          res = await applyAiEnhancement(selectedFile, {
-            brightness: aiResponse.brightness || 1.06,
-            contrast: aiResponse.contrast || 1.12,
-            saturation: aiResponse.saturation || 1.08,
-            sharpness: aiResponse.sharpness || 1.3,
-            warmth: aiResponse.warmth || 0,
-            vibrance: aiResponse.vibrance || 1.1,
-            highlights: aiResponse.highlights || -5,
-            shadows: aiResponse.shadows || 10,
-          });
+          res = await applyAiEnhancement(selectedFile, enhanceParams);
           break;
         }
 
-        // 2. AI Background Remover
+        // 2. AI Background Remover (NO TRUE LOCAL EQUIVALENT - Do NOT fake with corner chroma sampling!)
         case 'background-remover': {
-          setProgressStage('Isolating foreground subject and computing alpha matting...');
+          setProgressStage('Querying Gemini model for subject segmentation...');
           const aiResponse = await requestAiBackgroundRemoval(base64, selectedFile.type, bgTolerance);
-
           setAiInsights({
             title: 'Subject Isolation Report',
             content: `${aiResponse.subject ? `Subject: ${aiResponse.subject}. ` : ''}${aiResponse.summary || 'Computed edge boundary and foreground silhouette.'}`,
           });
+          setIsFallback(false);
 
           setProgressStage('Rendering alpha matte and transparency boundary...');
           res = await removeBackground(selectedFile, {
@@ -175,65 +352,113 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
           break;
         }
 
-        // 3. AI Object Remover (Inpainting)
+        // 3. AI Object Remover (NO TRUE LOCAL EQUIVALENT - Do NOT fake generative removal with smudge diffusion!)
         case 'object-remover': {
           if (!maskCanvas) {
             throw new Error('Please paint over the object you want to remove on the image.');
           }
 
-          setProgressStage('Analyzing surrounding textures and lighting vectors...');
           const maskBase64 = maskCanvas.toDataURL('image/png');
+          setProgressStage('Querying Gemini model for scene texture analysis...');
           const aiResponse = await requestAiObjectInpainting(base64, selectedFile.type, maskBase64);
-
           setAiInsights({
             title: 'Generative Inpainting Plan',
             content: `${aiResponse.contextAnalysis || 'Contextual continuity verified.'} Synthesizing ${aiResponse.texturePattern || 'ambient background'} texture.`,
           });
+          setIsFallback(false);
 
-          setProgressStage('Performing neural patch synthesis...');
+          setProgressStage('Performing texture patch synthesis...');
           res = await inpaintObject(selectedFile, maskCanvas);
           break;
         }
 
-        // 4. AI Image Upscaler
+        // 4. AI Image Upscaler (GENUINE LOCAL FALLBACK: High-order bicubic sub-pixel interpolation & edge sharpening)
         case 'image-upscaler': {
-          setProgressStage(`Reconstructing high-frequency textures for ${upscaleFactor}x super-resolution...`);
-          const aiResponse = await requestAiUpscale(base64, selectedFile.type, upscaleFactor);
-
-          setAiInsights({
-            title: 'Super-Resolution Synthesis',
-            content: aiResponse.resolutionAdvice || `Synthesized micro-edge sharpness and recovered fine detail at ${upscaleFactor}x scale.`,
-          });
+          if (isAiConfigured) {
+            try {
+              setProgressStage(`Querying Gemini model for ${upscaleFactor}x super-resolution guidance...`);
+              const aiResponse = await requestAiUpscale(base64, selectedFile.type, upscaleFactor);
+              setAiInsights({
+                title: 'Super-Resolution Synthesis',
+                content: aiResponse.resolutionAdvice || `Synthesized micro-edge sharpness and recovered fine detail at ${upscaleFactor}x scale.`,
+              });
+              setIsFallback(false);
+            } catch (aiErr: any) {
+              console.warn('AI upscale guidance unavailable, executing local bicubic super-resolution fallback:', aiErr);
+              usedLocalFallback = true;
+              fallbackMessage = getFallbackExplanation(
+                aiErr,
+                `high-order bicubic sub-pixel interpolation at ${upscaleFactor}x scale`
+              );
+              setAiInsights({
+                title: 'Local Algorithmic Upscaling (AI Unavailable)',
+                content: `Applied sub-pixel bicubic interpolation and high-frequency edge sharpening at ${upscaleFactor}x scale locally in your browser. (AI service was unavailable).`,
+              });
+              setIsFallback(true);
+            }
+          } else {
+            usedLocalFallback = true;
+            fallbackMessage = `AI API key not configured on server. Applied high-order bicubic interpolation and edge sharpening at ${upscaleFactor}x scale locally.`;
+            setAiInsights({
+              title: 'Local Algorithmic Upscaling',
+              content: `Applied sub-pixel bicubic interpolation and high-frequency edge sharpening at ${upscaleFactor}x scale locally in your browser.`,
+            });
+            setIsFallback(true);
+          }
 
           setProgressStage(`Interpolating sub-pixel grid (${upscaleFactor}x)...`);
           res = await upscaleImage(selectedFile, upscaleFactor);
           break;
         }
 
-        // 5. AI Background Blur
+        // 5. AI Background Blur (NO TRUE LOCAL EQUIVALENT - Do NOT fake portrait bokeh with static center ellipse!)
         case 'background-blur': {
-          setProgressStage('Estimating semantic depth planes and portrait focal boundary...');
+          setProgressStage('Querying Gemini model for depth plane analysis...');
           const aiResponse = await requestAiBackgroundBlur(base64, selectedFile.type, blurRadius);
-
           setAiInsights({
             title: 'Depth Segmentation Analysis',
             content: `${aiResponse.focusSummary || 'Isolated subject plane from ambient background.'} Simulated ${aiResponse.recommendedAperture || 'f/2.0'} aperture depth of field.`,
           });
+          setIsFallback(false);
 
           setProgressStage('Applying synthetic optical bokeh blur...');
           res = await blurBackground(selectedFile, blurRadius);
           break;
         }
 
-        // 6. AI Image Unblur
+        // 6. AI Image Unblur (GENUINE LOCAL FALLBACK: Spatial unsharp convolution & Laplacian edge enhancement)
         case 'image-unblur': {
-          setProgressStage('Analyzing blur vectors and point spread function (PSF)...');
-          const aiResponse = await requestAiUnblur(base64, selectedFile.type, unblurIntensity);
-
-          setAiInsights({
-            title: 'Deconvolution Diagnosis',
-            content: aiResponse.recoverySummary || 'Compensated for optical motion vectors and restored high-contrast edge frequencies.',
-          });
+          if (isAiConfigured) {
+            try {
+              setProgressStage('Querying Gemini model for blur defect analysis...');
+              const aiResponse = await requestAiUnblur(base64, selectedFile.type, unblurIntensity);
+              setAiInsights({
+                title: 'Deconvolution Diagnosis',
+                content: aiResponse.recoverySummary || 'Compensated for optical motion vectors and restored high-contrast edge frequencies.',
+              });
+              setIsFallback(false);
+            } catch (aiErr: any) {
+              console.warn('AI unblur diagnosis unavailable, executing local deconvolution fallback:', aiErr);
+              usedLocalFallback = true;
+              fallbackMessage = getFallbackExplanation(
+                aiErr,
+                'spatial unsharp convolution and high-frequency edge recovery'
+              );
+              setAiInsights({
+                title: 'Local Algorithmic Deblurring (AI Unavailable)',
+                content: 'Applied spatial unsharp convolution and high-frequency edge contrast recovery locally in your browser. (AI service was unavailable).',
+              });
+              setIsFallback(true);
+            }
+          } else {
+            usedLocalFallback = true;
+            fallbackMessage = 'AI API key not configured on server. Applied local spatial unsharp convolution and high-frequency edge restoration.';
+            setAiInsights({
+              title: 'Local Algorithmic Deblurring',
+              content: 'Applied spatial unsharp convolution and high-frequency contrast recovery locally in your browser.',
+            });
+            setIsFallback(true);
+          }
 
           setProgressStage('Executing high-pass deblurring filter...');
           res = await unblurImage(selectedFile, unblurIntensity);
@@ -241,15 +466,28 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
         }
       }
 
-      setResult(res);
-    } catch (err: any) {
-      console.error('AI processing error:', err);
-      if (err instanceof AiConfigurationError) {
-        setIsAiConfigured(false);
-        setConfigErrorMessage(err.message);
-      } else {
-        setConfigErrorMessage(err.message || 'Server AI processing encountered an error.');
+      if (resultRef.current?.url && resultRef.current.url !== res?.url) {
+        URL.revokeObjectURL(resultRef.current.url);
       }
+      setResult(res);
+
+      if (usedLocalFallback) {
+        setFallbackNotice({
+          message: fallbackMessage,
+          variant: 'warning',
+          canRetryAi: true,
+        });
+      }
+    } catch (err: any) {
+      console.error('Processing error:', err);
+      if (resultRef.current?.url) {
+        URL.revokeObjectURL(resultRef.current.url);
+        resultRef.current = null;
+      }
+      setResult(null);
+
+      const userMsg = getNoFallbackExplanation(tool.name, err);
+      setConfigErrorMessage(userMsg);
     } finally {
       setIsProcessing(false);
       setProgressStage('');
@@ -257,19 +495,34 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
   };
 
   const handleReset = () => {
+    if (originalUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(originalUrlRef.current);
+      originalUrlRef.current = null;
+    }
+    if (resultRef.current?.url?.startsWith('blob:')) {
+      URL.revokeObjectURL(resultRef.current.url);
+      resultRef.current = null;
+    }
     setSelectedFile(null);
     setOriginalUrl(null);
     setResult(null);
     setAiInsights(null);
     setConfigErrorMessage(null);
+    setFallbackNotice(null);
     setMaskCanvas(null);
+    setIsFallback(false);
   };
 
   return (
     <div className="space-y-8">
       {/* If server API key is not configured, show clear configuration message instead of fake processing */}
       {!isAiConfigured && !isCheckingConfig && (
-        <AiConfigAlert onRetry={verifyConfiguration} isRetrying={isCheckingConfig} />
+        <AiConfigAlert
+          onRetry={verifyConfiguration}
+          isRetrying={isCheckingConfig}
+          hasLocalFallback={TOOLS_WITH_LOCAL_FALLBACK.has(tool.id)}
+          toolName={tool.name}
+        />
       )}
 
       {!selectedFile ? (
@@ -523,12 +776,34 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
               </div>
             )}
 
-            {/* Error Message */}
+            {/* Fallback Notice (When local fallback was used) */}
+            {fallbackNotice && (
+              <InlineAlert
+                variant={fallbackNotice.variant}
+                message={fallbackNotice.message}
+                actionButton={
+                  fallbackNotice.canRetryAi
+                    ? {
+                        label: 'Retry with AI Model',
+                        onClick: handleProcess,
+                      }
+                    : undefined
+                }
+                onDismiss={() => setFallbackNotice(null)}
+              />
+            )}
+
+            {/* Error Message (Non-blocking failure notification) */}
             {configErrorMessage && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300 flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{configErrorMessage}</span>
-              </div>
+              <InlineAlert
+                variant="error"
+                message={configErrorMessage}
+                actionButton={{
+                  label: 'Retry with AI',
+                  onClick: handleProcess,
+                }}
+                onDismiss={() => setConfigErrorMessage(null)}
+              />
             )}
 
             {/* Action Buttons */}
@@ -536,12 +811,17 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
               <button
                 onClick={handleProcess}
                 disabled={isProcessing}
-                className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
                 {isProcessing ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" />
-                    <span>{progressStage || 'Processing with AI...'}</span>
+                    <span>{progressStage || 'Processing...'}</span>
+                  </>
+                ) : !isAiConfigured && TOOLS_WITH_LOCAL_FALLBACK.has(tool.id) ? (
+                  <>
+                    <Zap className="h-4 w-4 text-amber-400" />
+                    <span>Run Local {tool.name}</span>
                   </>
                 ) : (
                   <>
@@ -594,7 +874,15 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
                     beforeUrl={originalUrl}
                     afterUrl={result.url}
                     beforeLabel="Original"
-                    afterLabel="AI Enhanced"
+                    afterLabel={
+                      isFallback
+                        ? tool.id === 'ai-enhancer'
+                          ? 'Local Enhanced'
+                          : tool.id === 'image-upscaler'
+                          ? 'Local Upscaled'
+                          : 'Local Deblurred'
+                        : 'AI Enhanced'
+                    }
                   />
                 </div>
               ) : (
@@ -612,9 +900,16 @@ export const AiToolsView: React.FC<AiToolsViewProps> = ({ tool }) => {
               {result && (
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 text-xs text-left">
                   <div className="space-y-1">
-                    <span className="font-bold text-slate-900 dark:text-white block truncate max-w-xs sm:max-w-sm">
-                      {result.fileName}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-slate-900 dark:text-white block truncate max-w-xs sm:max-w-sm">
+                        {result.fileName}
+                      </span>
+                      {isFallback && (
+                        <span className="rounded-md bg-amber-100 dark:bg-amber-950/80 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:text-amber-300">
+                          Local Engine
+                        </span>
+                      )}
+                    </div>
                     <span className="text-slate-400 font-mono tabular-nums">
                       {result.width} × {result.height} px · {formatBytes(result.fileSize)}
                     </span>

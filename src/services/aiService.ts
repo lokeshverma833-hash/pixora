@@ -73,9 +73,26 @@ export interface AiUnblurResponse {
 }
 
 export class AiConfigurationError extends Error {
+  readonly status = 503;
   constructor(message: string) {
     super(message);
     this.name = 'AiConfigurationError';
+  }
+}
+
+export class AiRateLimitError extends Error {
+  readonly status = 429;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiRateLimitError';
+  }
+}
+
+export class AiServiceUnavailableError extends Error {
+  readonly status = 503;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiServiceUnavailableError';
   }
 }
 
@@ -121,23 +138,49 @@ export function fileToBase64(file: File | Blob): Promise<string> {
  * Generic post helper with error classification
  */
 async function postAiEndpoint<T>(endpoint: string, payload: any): Promise<T> {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (netErr: any) {
+    throw new AiServiceUnavailableError(
+      'Unable to connect to the AI processing service. Please check your network connection or try again shortly.'
+    );
+  }
 
   const data = await res.json().catch(() => ({}));
 
-  if (res.status === 503 || data.error === 'API_KEY_NOT_CONFIGURED') {
-    throw new AiConfigurationError(
-      data.message ||
-        'Gemini AI API key is not configured on the server. Please set GEMINI_API_KEY in your environment secrets.'
+  if (
+    res.status === 429 ||
+    data.error === 'QUOTA_EXHAUSTED' ||
+    data.error === 'RESOURCE_EXHAUSTED' ||
+    String(data.message || '').includes('429')
+  ) {
+    throw new AiRateLimitError(
+      data.message || 'Gemini AI rate limit or quota exceeded (HTTP 429). Please wait a moment before retrying.'
+    );
+  }
+
+  if (res.status === 503 || data.error === 'SERVICE_UNAVAILABLE') {
+    if (data.error === 'API_KEY_NOT_CONFIGURED') {
+      throw new AiConfigurationError(
+        data.message ||
+          'Gemini AI API key is not configured on the server. Please set GEMINI_API_KEY in your deployment environment secrets.'
+      );
+    }
+    throw new AiServiceUnavailableError(
+      data.message || 'Gemini AI service is temporarily experiencing high demand (HTTP 503). Please try again shortly.'
     );
   }
 
   if (!res.ok) {
-    throw new Error(data.error || `Server AI processing failed (${res.status})`);
+    const rawMsg = data.message || data.error || `Server AI processing failed (${res.status})`;
+    // Sanitize any API key or sensitive server patterns
+    const sanitizedMsg = String(rawMsg).replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_KEY]');
+    throw new Error(sanitizedMsg);
   }
 
   return data as T;

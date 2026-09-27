@@ -60,6 +60,48 @@ async function startServer() {
     return true;
   };
 
+  // Classify Gemini errors and sanitize messages
+  const classifyGeminiError = (err: any): { status: number; code: string; message: string } => {
+    const msg = String(err?.message || err || '');
+    const errStr = typeof err === 'object' ? JSON.stringify(err) : String(err);
+    const combined = (msg + ' ' + errStr).toLowerCase();
+    const status = Number(err?.status || err?.statusCode || 0);
+
+    if (
+      status === 429 ||
+      combined.includes('429') ||
+      combined.includes('resource_exhausted') ||
+      combined.includes('quota') ||
+      combined.includes('rate limit')
+    ) {
+      return {
+        status: 429,
+        code: 'QUOTA_EXHAUSTED',
+        message: 'Gemini AI rate limit or quota exceeded. Please try again shortly or use local processing.',
+      };
+    }
+
+    if (
+      status === 503 ||
+      combined.includes('503') ||
+      combined.includes('unavailable') ||
+      combined.includes('high demand') ||
+      combined.includes('overloaded')
+    ) {
+      return {
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Gemini AI service is temporarily experiencing high demand. Please try again shortly.',
+      };
+    }
+
+    return {
+      status: status >= 400 && status < 600 ? status : 500,
+      code: 'AI_PROCESSING_ERROR',
+      message: 'AI processing service encountered a temporary error. Please try again.',
+    };
+  };
+
   // Helper to execute Gemini requests with fallback on temporary demand spikes
   const callGeminiWithRetry = async (contents: any[], responseMimeType?: string) => {
     const config = responseMimeType ? { responseMimeType } : undefined;
@@ -70,9 +112,21 @@ async function startServer() {
         config,
       });
     } catch (err: any) {
-      const errStr = JSON.stringify(err);
+      const errStr = String(err?.message || err || '') + ' ' + (typeof err === 'object' ? JSON.stringify(err) : '');
+      const is429 =
+        err?.status === 429 ||
+        err?.statusCode === 429 ||
+        errStr.includes('429') ||
+        errStr.includes('RESOURCE_EXHAUSTED') ||
+        errStr.toLowerCase().includes('quota');
+
+      // Do NOT repeatedly retry 429 quota-exhausted requests
+      if (is429) {
+        throw err;
+      }
+
       if (errStr.includes('503') || errStr.includes('high demand') || errStr.includes('UNAVAILABLE')) {
-        console.warn('Model busy, retrying with gemini-flash-latest...');
+        console.warn('Model busy, retrying once with gemini-flash-latest...');
         return await ai!.models.generateContent({
           model: 'gemini-flash-latest',
           contents,
@@ -131,8 +185,9 @@ Only return valid JSON with these exact numeric keys:
       const parsed = JSON.parse(text);
       res.json({ ...parsed, success: true, isAiPowered: true });
     } catch (err: any) {
-      console.error('AI enhance error:', err);
-      res.status(500).json({ error: err.message || 'AI enhance processing failed.' });
+      console.error('AI enhance error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 
@@ -183,8 +238,9 @@ Only return valid JSON with these exact numeric keys:
       const parsed = JSON.parse(response.text?.trim() || '{}');
       res.json({ ...parsed, success: true });
     } catch (err: any) {
-      console.error('AI background removal error:', err);
-      res.status(500).json({ error: err.message || 'AI background removal failed.' });
+      console.error('AI background removal error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 
@@ -230,8 +286,9 @@ Output strict JSON format:
       const parsed = JSON.parse(response.text?.trim() || '{}');
       res.json({ ...parsed, success: true });
     } catch (err: any) {
-      console.error('AI object removal error:', err);
-      res.status(500).json({ error: err.message || 'AI object inpainting failed.' });
+      console.error('AI object removal error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 
@@ -278,8 +335,9 @@ Output strict JSON format:
       const parsed = JSON.parse(response.text?.trim() || '{}');
       res.json({ ...parsed, success: true });
     } catch (err: any) {
-      console.error('AI upscale error:', err);
-      res.status(500).json({ error: err.message || 'AI upscale failed.' });
+      console.error('AI upscale error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 
@@ -326,8 +384,9 @@ Output strict JSON format:
       const parsed = JSON.parse(response.text?.trim() || '{}');
       res.json({ ...parsed, success: true });
     } catch (err: any) {
-      console.error('AI background blur error:', err);
-      res.status(500).json({ error: err.message || 'AI background blur failed.' });
+      console.error('AI background blur error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 
@@ -374,8 +433,9 @@ Output strict JSON format:
       const parsed = JSON.parse(response.text?.trim() || '{}');
       res.json({ ...parsed, success: true });
     } catch (err: any) {
-      console.error('AI unblur error:', err);
-      res.status(500).json({ error: err.message || 'AI unblur failed.' });
+      console.error('AI unblur error:', err?.message || err);
+      const classified = classifyGeminiError(err);
+      res.status(classified.status).json({ error: classified.code, message: classified.message });
     }
   });
 

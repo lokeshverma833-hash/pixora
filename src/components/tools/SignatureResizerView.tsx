@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Download, RefreshCw, Check, Sparkles, Sliders, ShieldCheck } from 'lucide-react';
 import { Dropzone } from '../common/Dropzone';
+import { InlineAlert } from '../common/InlineAlert';
 import { cleanSignature, formatBytes } from '../../utils/imageProcessors';
 import { ProcessingResult } from '../../types';
 
@@ -16,6 +17,7 @@ export const SignatureResizerView: React.FC = () => {
   });
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const presets = [
     { w: 140, h: 60, label: '140 x 60 px (Standard Portal / <20KB)' },
@@ -23,17 +25,49 @@ export const SignatureResizerView: React.FC = () => {
     { w: 300, h: 120, label: '300 x 120 px (High-Res Digital Stamp)' },
   ];
 
+  const originalUrlRef = useRef<string | null>(null);
+  const resultRef = useRef<ProcessingResult | null>(null);
+
+  useEffect(() => {
+    originalUrlRef.current = originalUrl;
+  }, [originalUrl]);
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
+    };
+  }, []);
+
   const handleFile = (files: File[]) => {
     if (files.length > 0) {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
+      const url = URL.createObjectURL(files[0]);
       setSelectedFile(files[0]);
-      setOriginalUrl(URL.createObjectURL(files[0]));
+      setOriginalUrl(url);
       setResult(null);
+      setErrorMessage(null);
     }
   };
 
   const handleProcess = async () => {
     if (!selectedFile) return;
     setIsProcessing(true);
+    setErrorMessage(null);
     try {
       const res = await cleanSignature(selectedFile, {
         threshold,
@@ -41,13 +75,31 @@ export const SignatureResizerView: React.FC = () => {
         targetWidth: presetSize.w,
         targetHeight: presetSize.h,
       });
+      if (resultRef.current?.url?.startsWith('blob:') && resultRef.current.url !== res.url) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
       setResult(res);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Failed to clean signature.');
+      setErrorMessage(err?.message || 'Failed to clean signature. Please check the image format.');
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleReset = () => {
+    if (originalUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(originalUrlRef.current);
+      originalUrlRef.current = null;
+    }
+    if (resultRef.current?.url?.startsWith('blob:')) {
+      URL.revokeObjectURL(resultRef.current.url);
+      resultRef.current = null;
+    }
+    setSelectedFile(null);
+    setOriginalUrl(null);
+    setResult(null);
+    setErrorMessage(null);
   };
 
   return (
@@ -152,6 +204,14 @@ export const SignatureResizerView: React.FC = () => {
               </div>
             </div>
 
+            {/* Error Notification */}
+            {errorMessage && (
+              <InlineAlert
+                message={errorMessage}
+                onDismiss={() => setErrorMessage(null)}
+              />
+            )}
+
             {/* Action Buttons */}
             <div className="pt-2 flex gap-3">
               <button
@@ -172,10 +232,7 @@ export const SignatureResizerView: React.FC = () => {
                 )}
               </button>
               <button
-                onClick={() => {
-                  setSelectedFile(null);
-                  setResult(null);
-                }}
+                onClick={handleReset}
                 className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800"
               >
                 Reset

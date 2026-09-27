@@ -19,6 +19,7 @@ import {
   Plus,
   Image as ImageIcon,
   CheckCircle,
+  Loader2,
 } from 'lucide-react';
 import { ToolItem, ProcessingResult } from '../../types';
 import { Dropzone } from '../common/Dropzone';
@@ -35,6 +36,7 @@ import {
 } from '../../utils/pdfProcessors';
 import { renderPdfToImages, RenderedPdfPage } from '../../utils/pdfRenderer';
 import { formatBytes } from '../../utils/imageProcessors';
+import { createZipBlob, downloadBlob } from '../../utils/zipUtils';
 
 interface PdfToolsViewProps {
   tool: ToolItem;
@@ -67,18 +69,81 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
   // Processing, progress & results
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
+  const [zipDownloadError, setZipDownloadError] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [progressStatus, setProgressStatus] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const appendInputRef = useRef<HTMLInputElement>(null);
+  const resultRef = useRef<ProcessingResult | null>(null);
 
   const isJpgToPdf = tool.id === 'jpg-to-pdf';
   const isMerge = tool.id === 'merge-pdf';
 
+  // Helper to safely revoke all URLs in a PDF ProcessingResult
+  const revokePdfResultUrls = (r: ProcessingResult | null) => {
+    if (!r) return;
+    if (r.url && typeof r.url === 'string' && r.url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(r.url);
+      } catch {
+        // Ignore
+      }
+    }
+    if (Array.isArray(r.pages)) {
+      for (const page of r.pages) {
+        if (page.url && typeof page.url === 'string' && page.url.startsWith('blob:')) {
+          try {
+            URL.revokeObjectURL(page.url);
+          } catch {
+            // Ignore
+          }
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  // Unmount cleanup
+  useEffect(() => {
+    return () => {
+      revokePdfResultUrls(resultRef.current);
+    };
+  }, []);
+
+  // Dedicated preview loader with error handling & retry capability
+  const loadPdfPreviews = async (pdfFile: File) => {
+    if (isLoadingPreviews) return;
+    setIsLoadingPreviews(true);
+    setPreviewError(null);
+    try {
+      const count = await getPdfPageCount(pdfFile);
+      setPageCount(count);
+      setSelectedPages(Array.from({ length: count }, (_, i) => i + 1));
+      setPageRangeStr(`1-${Math.min(count, 3)}`);
+
+      // Render thumbnails for visual preview
+      const rendered = await renderPdfToImages(pdfFile, 0.75, 16);
+      setPagePreviews(rendered);
+    } catch (err: any) {
+      console.warn('Could not read PDF previews:', err);
+      setPreviewError(
+        err?.message || 'Could not render page previews. The document may be complex or password-protected.'
+      );
+    } finally {
+      setIsLoadingPreviews(false);
+    }
+  };
+
   // Load files handler with validation
   const handleFiles = async (newFiles: File[]) => {
     setErrorMessage(null);
+    setPreviewError(null);
     if (newFiles.length === 0) return;
 
     if (isJpgToPdf) {
@@ -88,6 +153,8 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
         setErrorMessage('Please upload image files (JPG, PNG, WebP) for JPG to PDF conversion.');
         return;
       }
+      revokePdfResultUrls(resultRef.current);
+      resultRef.current = null;
       setFiles(valid);
       setResult(null);
       return;
@@ -102,27 +169,14 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
       return;
     }
 
+    revokePdfResultUrls(resultRef.current);
+    resultRef.current = null;
     setFiles(valid);
     setResult(null);
     setPagePreviews([]);
 
     // Load PDF structure and render page previews
-    const firstPdf = valid[0];
-    try {
-      setIsLoadingPreviews(true);
-      const count = await getPdfPageCount(firstPdf);
-      setPageCount(count);
-      setSelectedPages(Array.from({ length: count }, (_, i) => i + 1));
-      setPageRangeStr(`1-${Math.min(count, 3)}`);
-
-      // Render thumbnails for visual preview
-      const rendered = await renderPdfToImages(firstPdf, 0.75, 16);
-      setPagePreviews(rendered);
-    } catch (err) {
-      console.warn('Could not read PDF previews:', err);
-    } finally {
-      setIsLoadingPreviews(false);
-    }
+    await loadPdfPreviews(valid[0]);
   };
 
   // Append additional files
@@ -147,6 +201,8 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
   const removeFile = (index: number) => {
     setFiles(files.filter((_, i) => i !== index));
     if (files.length <= 1) {
+      revokePdfResultUrls(resultRef.current);
+      resultRef.current = null;
       setResult(null);
       setPagePreviews([]);
     }
@@ -159,6 +215,8 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
     } else {
       setSelectedPages([...selectedPages, pageNum].sort((a, b) => a - b));
     }
+    revokePdfResultUrls(resultRef.current);
+    resultRef.current = null;
     setResult(null);
   };
 
@@ -241,6 +299,9 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
       setProgress(95);
       setProgressStatus('Finalizing document...');
       setTimeout(() => {
+        if (resultRef.current && resultRef.current.url !== res?.url) {
+          revokePdfResultUrls(resultRef.current);
+        }
         setResult(res);
         setProgress(100);
         setProgressStatus('Complete!');
@@ -254,12 +315,49 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
     }
   };
 
+  // Download all extracted PDF pages as a single ZIP archive
+  const handleDownloadAllPagesZip = async () => {
+    if (!result?.pages || result.pages.length === 0) {
+      setZipDownloadError('No page images available to download.');
+      return;
+    }
+
+    setIsDownloadingZip(true);
+    setZipDownloadError(null);
+
+    try {
+      const zipInputs = await Promise.all(
+        result.pages.map(async (p) => {
+          const resp = await fetch(p.url);
+          const blob = await resp.blob();
+          return {
+            name: p.fileName || `page_${p.pageNumber}.jpg`,
+            data: blob,
+          };
+        })
+      );
+
+      const zipBlob = await createZipBlob(zipInputs);
+      const baseName = files[0]?.name.replace(/\.[^/.]+$/, '') || 'pdf_pages';
+      downloadBlob(zipBlob, `${baseName}_all_pages.zip`);
+    } catch (err: any) {
+      console.error('Failed to create ZIP of PDF pages:', err);
+      setZipDownloadError('Failed to package pages into ZIP. You can still download individual pages.');
+    } finally {
+      setIsDownloadingZip(false);
+    }
+  };
+
   const handleReset = () => {
+    revokePdfResultUrls(resultRef.current);
+    resultRef.current = null;
     setFiles([]);
     setPageCount(1);
     setPagePreviews([]);
     setResult(null);
     setErrorMessage(null);
+    setPreviewError(null);
+    setZipDownloadError(null);
     setProgress(0);
   };
 
@@ -290,7 +388,7 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
           {/* Workstation Grid: Controls & Visual Preview */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* Controls Column */}
-            <div className="lg:col-span-5 space-y-6 rounded-3xl bg-white p-6 shadow-2xs border border-slate-200/80 dark:bg-slate-900 dark:border-slate-800">
+            <div className="lg:col-span-5 space-y-6 rounded-2xl sm:rounded-3xl bg-white p-4 sm:p-6 shadow-2xs border border-slate-200/80 dark:bg-slate-900 dark:border-slate-800">
               <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-800">
                 <h3 className="font-display text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
@@ -716,11 +814,22 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                 </div>
               )}
 
-              {/* Error Alert */}
+              {/* Error Alert with Try Again */}
               {errorMessage && (
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300 flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 sm:p-3.5 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300 flex flex-col xs:flex-row xs:items-center justify-between gap-2.5">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                    <span className="break-words">{errorMessage}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleProcess}
+                    disabled={isProcessing || (tool.id === 'extract-pdf-pages' && selectedPages.length === 0)}
+                    className="self-start xs:self-auto shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50 transition-colors text-xs shadow-2xs"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isProcessing ? 'animate-spin' : ''}`} />
+                    Try Again
+                  </button>
                 </div>
               )}
 
@@ -744,27 +853,29 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
               )}
 
               {/* Process & Reset Action Buttons */}
-              <div className="pt-2 flex gap-3">
+              <div className="pt-2 flex flex-col xs:flex-row gap-2 sm:gap-3">
                 <button
+                  type="button"
                   onClick={handleProcess}
                   disabled={isProcessing || (tool.id === 'extract-pdf-pages' && selectedPages.length === 0)}
-                  className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                  className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-3.5 sm:px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 min-h-[44px]"
                 >
                   {isProcessing ? (
                     <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
                       <span>Processing...</span>
                     </>
                   ) : (
                     <>
-                      <FileCheck className="h-4 w-4" />
-                      <span>Execute {tool.name}</span>
+                      <FileCheck className="h-4 w-4 shrink-0" />
+                      <span className="truncate">Execute {tool.name}</span>
                     </>
                   )}
                 </button>
                 <button
+                  type="button"
                   onClick={handleReset}
-                  className="rounded-xl border border-slate-200/80 px-4 py-3 text-xs sm:text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+                  className="rounded-xl border border-slate-200/80 px-4 py-3 text-xs sm:text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors min-h-[44px] flex items-center justify-center"
                 >
                   Reset
                 </button>
@@ -788,6 +899,35 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                   <div className="p-12 text-center text-xs text-slate-500 space-y-2">
                     <RefreshCw className="h-5 w-5 animate-spin mx-auto text-indigo-600" />
                     <p>Rendering document page thumbnails...</p>
+                  </div>
+                )}
+
+                {/* Preview Loading Failure with Try Again */}
+                {previewError && !isLoadingPreviews && (
+                  <div className="my-4 rounded-2xl border border-amber-200 bg-amber-50/80 p-4 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300 space-y-3">
+                    <div className="flex items-start gap-2.5">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                      <div className="space-y-1">
+                        <p className="font-semibold text-amber-950 dark:text-amber-200">Unable to load page previews</p>
+                        <p className="text-amber-800/90 dark:text-amber-300/90 leading-relaxed break-words">
+                          {previewError}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => files[0] && loadPdfPreviews(files[0])}
+                        disabled={isLoadingPreviews}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 transition-colors shadow-2xs text-xs"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${isLoadingPreviews ? 'animate-spin' : ''}`} />
+                        Try Again
+                      </button>
+                      <span className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
+                        Document operations can still be executed.
+                      </span>
+                    </div>
                   </div>
                 )}
 
@@ -889,11 +1029,11 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                 {result && (
                   <div className="space-y-4 animate-in fade-in duration-200">
                     <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 text-xs text-left space-y-4">
-                      <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
                         <div className="flex items-center gap-2">
-                          <FileCheck className="h-5 w-5 text-emerald-600" />
-                          <div>
-                            <span className="font-bold text-slate-900 dark:text-white block text-sm">
+                          <FileCheck className="h-5 w-5 text-emerald-600 shrink-0" />
+                          <div className="min-w-0">
+                            <span className="font-bold text-slate-900 dark:text-white block text-sm truncate max-w-xs">
                               {result.fileName}
                             </span>
                             <span className="text-slate-400 font-mono tabular-nums">
@@ -906,7 +1046,7 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                         <a
                           href={result.url}
                           download={result.fileName}
-                          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors"
+                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors min-h-[42px]"
                         >
                           <Download className="h-4 w-4" />
                           Download Output
@@ -916,11 +1056,59 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                       {/* If PDF to JPG: Render all page downloads */}
                       {result.pages && result.pages.length > 0 && (
                         <div className="space-y-3 pt-1">
-                          <div className="flex justify-between items-center">
+                          <div className="flex flex-wrap justify-between items-center gap-2">
                             <span className="font-bold text-slate-900 dark:text-white">
                               Extracted Page Images ({result.pages.length})
                             </span>
+
+                            {/* Download All Pages button */}
+                            <button
+                              type="button"
+                              onClick={handleDownloadAllPagesZip}
+                              disabled={isDownloadingZip}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                            >
+                              {isDownloadingZip ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Packaging All Pages...
+                                </>
+                              ) : (
+                                <>
+                                  <FileArchive className="h-3.5 w-3.5" /> Download All Pages ({result.pages.length} ZIP)
+                                </>
+                              )}
+                            </button>
                           </div>
+
+                          {/* Non-blocking Zip error with Try Again */}
+                          {zipDownloadError && (
+                            <div className="flex flex-col xs:flex-row xs:items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 p-2.5 sm:p-3 text-xs text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                              <div className="flex items-start sm:items-center gap-2 min-w-0">
+                                <AlertCircle className="h-4 w-4 shrink-0 text-rose-500 mt-0.5 sm:mt-0" />
+                                <span className="break-words">{zipDownloadError}</span>
+                              </div>
+                              <div className="flex items-center gap-2 self-start xs:self-auto shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={handleDownloadAllPagesZip}
+                                  disabled={isDownloadingZip}
+                                  className="font-medium text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 text-xs"
+                                >
+                                  <RefreshCw className={`h-3 w-3 ${isDownloadingZip ? 'animate-spin' : ''}`} />
+                                  Try Again
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setZipDownloadError(null)}
+                                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 px-1 font-bold text-xs"
+                                  title="Dismiss"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
                           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                             {result.pages.map((p) => (
                               <div

@@ -21,6 +21,8 @@ import {
   FileText,
   AlertCircle,
   Sparkles,
+  FileArchive,
+  Loader2,
 } from 'lucide-react';
 import { ToolItem, ProcessingResult } from '../../types';
 import { Dropzone } from '../common/Dropzone';
@@ -39,6 +41,7 @@ import {
   formatBytes,
 } from '../../utils/imageProcessors';
 import { imagesToPdf } from '../../utils/pdfProcessors';
+import { createZipBlob, downloadBlob } from '../../utils/zipUtils';
 
 interface ImageToolsViewProps {
   tool: ToolItem;
@@ -52,6 +55,8 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [batchResults, setBatchResults] = useState<{ [index: number]: ProcessingResult }>({});
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
+  const [batchDownloadError, setBatchDownloadError] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Tool Specific Controls State
@@ -115,6 +120,53 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
   const [pdfMargin, setPdfMargin] = useState<number>(10);
 
   const fileInputAppendRef = useRef<HTMLInputElement>(null);
+  const originalUrlRef = useRef<string | null>(null);
+  const batchResultsRef = useRef<{ [index: number]: ProcessingResult }>({});
+  const resultRef = useRef<ProcessingResult | null>(null);
+
+  // Helper to safely revoke a blob URL
+  const revokeBlobUrl = (url?: string | null) => {
+    if (url && typeof url === 'string' && url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  const revokeAllStoredUrls = () => {
+    if (originalUrlRef.current) {
+      revokeBlobUrl(originalUrlRef.current);
+      originalUrlRef.current = null;
+    }
+    const revoked = new Set<string>();
+    Object.values(batchResultsRef.current).forEach((r) => {
+      if (r?.url && !revoked.has(r.url)) {
+        revokeBlobUrl(r.url);
+        revoked.add(r.url);
+      }
+    });
+    if (resultRef.current?.url && !revoked.has(resultRef.current.url)) {
+      revokeBlobUrl(resultRef.current.url);
+      revoked.add(resultRef.current.url);
+    }
+  };
+
+  useEffect(() => {
+    batchResultsRef.current = batchResults;
+  }, [batchResults]);
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  // Unmount cleanup
+  useEffect(() => {
+    return () => {
+      revokeAllStoredUrls();
+    };
+  }, []);
 
   // Multi-file supported tools
   const isMultiFileSupported =
@@ -131,6 +183,10 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
     if (files.length > 0 && files[activeFileIndex]) {
       const activeFile = files[activeFileIndex];
       const url = URL.createObjectURL(activeFile);
+      if (originalUrlRef.current && originalUrlRef.current !== url) {
+        revokeBlobUrl(originalUrlRef.current);
+      }
+      originalUrlRef.current = url;
       setOriginalUrl(url);
 
       const img = new Image();
@@ -185,6 +241,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
       return;
     }
 
+    revokeAllStoredUrls();
     setFiles(valid);
     setActiveFileIndex(0);
     setResult(null);
@@ -212,7 +269,22 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
   };
 
   const removeFile = (index: number) => {
+    // Revoke URL of the removed file's result if any
+    const removedRes = batchResultsRef.current[index];
+    if (removedRes?.url) {
+      revokeBlobUrl(removedRes.url);
+    }
     const updated = files.filter((_, i) => i !== index);
+    const updatedBatchResults: { [key: number]: ProcessingResult } = {};
+    let newIdx = 0;
+    for (let i = 0; i < files.length; i++) {
+      if (i === index) continue;
+      if (batchResults[i]) {
+        updatedBatchResults[newIdx] = batchResults[i];
+      }
+      newIdx++;
+    }
+    setBatchResults(updatedBatchResults);
     setFiles(updated);
     if (activeFileIndex >= updated.length) {
       setActiveFileIndex(Math.max(0, updated.length - 1));
@@ -399,9 +471,16 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
           orientation: overrides?.customPdfOrientation ?? pdfOrientation,
           margin: overrides?.customPdfMargin ?? pdfMargin,
         });
+        if (resultRef.current?.url && resultRef.current.url !== res.url) {
+          revokeBlobUrl(resultRef.current.url);
+        }
         setResult(res);
       } else {
         const res = await processSingleFile(currentFile, overrides);
+        const prevForIndex = batchResultsRef.current[activeFileIndex]?.url;
+        if (prevForIndex && prevForIndex !== res.url) {
+          revokeBlobUrl(prevForIndex);
+        }
         setResult(res);
         setBatchResults((prev) => ({ ...prev, [activeFileIndex]: res }));
       }
@@ -440,6 +519,10 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
     try {
       for (let i = 0; i < files.length; i++) {
         const r = await processSingleFile(files[i]);
+        const oldUrl = batchResultsRef.current[i]?.url;
+        if (oldUrl && oldUrl !== r.url) {
+          revokeBlobUrl(oldUrl);
+        }
         newResults[i] = r;
       }
       setBatchResults(newResults);
@@ -452,14 +535,68 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
     }
   };
 
+  // Download All Processed Batch Results as a ZIP archive
+  const handleDownloadAllBatch = async () => {
+    // Collect all valid available results
+    const availableResults: ProcessingResult[] = [];
+    for (let i = 0; i < files.length; i++) {
+      if (batchResults[i]) {
+        availableResults.push(batchResults[i]);
+      }
+    }
+
+    // If active single result is available but not in batchResults, include it
+    if (availableResults.length === 0 && result) {
+      availableResults.push(result);
+    }
+
+    if (availableResults.length === 0) {
+      setBatchDownloadError('No processed results available to download.');
+      return;
+    }
+
+    setIsDownloadingZip(true);
+    setBatchDownloadError(null);
+
+    try {
+      const zipInputs = await Promise.all(
+        availableResults.map(async (res, idx) => {
+          let dataBlob: Blob;
+          if (res.blob) {
+            dataBlob = res.blob;
+          } else {
+            const resp = await fetch(res.url);
+            dataBlob = await resp.blob();
+          }
+          const filename = res.fileName || `processed_image_${idx + 1}.png`;
+          return {
+            name: filename,
+            data: dataBlob,
+          };
+        })
+      );
+
+      const zipBlob = await createZipBlob(zipInputs);
+      const zipName = `${tool.id || 'pixora'}_batch_results.zip`;
+      downloadBlob(zipBlob, zipName);
+    } catch (err: any) {
+      console.error('Batch download failed:', err);
+      setBatchDownloadError('Failed to prepare combined ZIP download. Please download files individually.');
+    } finally {
+      setIsDownloadingZip(false);
+    }
+  };
+
   // Reset
   const handleReset = () => {
+    revokeAllStoredUrls();
     setFiles([]);
     setActiveFileIndex(0);
     setOriginalUrl(null);
     setResult(null);
     setBatchResults({});
     setErrorMessage(null);
+    setBatchDownloadError(null);
   };
 
   const activeFile = files[activeFileIndex];
@@ -479,18 +616,18 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
           {/* Multi-Image Thumbnail Ribbon */}
           {files.length > 1 && (
             <div className="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-slate-800 dark:bg-slate-900 shadow-2xs">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-                <div className="flex items-center gap-2">
-                  <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
                   <span className="text-xs font-bold text-slate-900 dark:text-white">
                     {files.length} Images Loaded
                   </span>
-                  <span className="text-[11px] text-slate-400 font-medium">
+                  <span className="text-[11px] text-slate-400 font-medium hidden xs:inline">
                     (Click any to inspect or edit)
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <input
                     ref={fileInputAppendRef}
                     type="file"
@@ -513,6 +650,26 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                       className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-indigo-500 disabled:opacity-50"
                     >
                       <Sparkles className="h-3 w-3" /> Process All ({files.length})
+                    </button>
+                  )}
+
+                  {/* Download All Processed Files as ZIP */}
+                  {Object.keys(batchResults).length > 1 && (
+                    <button
+                      onClick={handleDownloadAllBatch}
+                      disabled={isDownloadingZip}
+                      className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+                      title="Download all processed files as a ZIP archive"
+                    >
+                      {isDownloadingZip ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" /> Packaging ZIP...
+                        </>
+                      ) : (
+                        <>
+                          <FileArchive className="h-3 w-3" /> Download All ({Object.keys(batchResults).length})
+                        </>
+                      )}
                     </button>
                   )}
                 </div>
@@ -602,7 +759,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
           {/* Workstation Grid: Left Controls, Right Preview & Results */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* Controls Panel */}
-            <div className="lg:col-span-5 space-y-6 rounded-3xl bg-white p-6 shadow-2xs border border-slate-200/80 dark:bg-slate-900 dark:border-slate-800">
+            <div className="lg:col-span-5 space-y-6 rounded-2xl sm:rounded-3xl bg-white p-4 sm:p-6 shadow-2xs border border-slate-200/80 dark:bg-slate-900 dark:border-slate-800">
               <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-800">
                 <h3 className="font-display text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
@@ -642,7 +799,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                   </div>
 
                   {/* Quality Presets */}
-                  <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  <div className="grid grid-cols-2 xs:grid-cols-4 gap-1.5 text-xs">
                     {[
                       { label: 'Ultra (98%)', val: 0.98 },
                       { label: 'High (85%)', val: 0.85 },
@@ -655,7 +812,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                           setQuality(preset.val);
                           runProcessing({ customQuality: preset.val });
                         }}
-                        className={`py-2 px-1 rounded-xl border text-center font-bold text-[11px] transition-all ${
+                        className={`py-2 px-1.5 rounded-xl border text-center font-bold text-[11px] transition-all min-h-[36px] flex items-center justify-center ${
                           Math.abs(quality - preset.val) < 0.04
                             ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
                             : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
@@ -671,7 +828,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                     <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
                       Output Format
                     </label>
-                    <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                       {[
                         { id: 'auto', label: 'Original' },
                         { id: 'image/webp', label: 'WebP (Smallest)' },
@@ -705,15 +862,15 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                     <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-2">
                       Quick Percentage Scale
                     </label>
-                    <div className="grid grid-cols-6 gap-1.5 text-xs">
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-xs">
                       {[25, 50, 75, 100, 150, 200].map((pct) => (
                         <button
                           key={pct}
                           onClick={() => handleScalePercent(pct)}
-                          className={`py-1.5 rounded-lg border font-medium text-center transition-all ${
+                          className={`py-2 sm:py-1.5 rounded-lg border font-medium text-center transition-all ${
                             scalePercent === pct
-                              ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200'
-                              : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                              ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 font-bold'
+                              : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                           }`}
                         >
                           {pct}%
@@ -792,7 +949,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                   </div>
 
                   {/* KB Presets */}
-                  <div className="grid grid-cols-5 gap-1.5 text-xs">
+                  <div className="grid grid-cols-3 xs:grid-cols-5 gap-1.5 text-xs">
                     {[20, 50, 100, 200, 500].map((kb) => (
                       <button
                         key={kb}
@@ -800,10 +957,10 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                           setTargetKb(kb);
                           setResult(null);
                         }}
-                        className={`py-1.5 rounded-lg border font-medium text-center transition-all ${
+                        className={`py-2 px-1 rounded-lg border font-medium text-center transition-all min-h-[36px] flex items-center justify-center ${
                           targetKb === kb
-                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200'
-                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 font-bold shadow-2xs ring-1 ring-indigo-500'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                         }`}
                       >
                         {kb} KB
@@ -1135,7 +1292,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                   <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
                     Target Proportions
                   </label>
-                  <div className="grid grid-cols-4 gap-2 text-xs">
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 text-xs">
                     {['16:9', '4:3', '1:1', '9:16', '3:2', '2:3', '21:9'].map((ratio) => (
                       <button
                         key={ratio}
@@ -1143,10 +1300,10 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                           setAspectRatioKey(ratio);
                           setResult(null);
                         }}
-                        className={`p-2 rounded-xl border text-center font-semibold ${
+                        className={`p-2 sm:p-2.5 rounded-xl border text-center font-semibold min-h-[38px] flex items-center justify-center transition-all ${
                           aspectRatioKey === ratio
-                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200'
-                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                         }`}
                       >
                         {ratio}
@@ -1438,21 +1595,22 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
               )}
 
               {/* Process & Reset Action Buttons */}
-              <div className="pt-2 flex gap-3">
+              <div className="pt-2 flex flex-col xs:flex-row gap-2 sm:gap-3">
                 <button
+                  type="button"
                   onClick={handleProcess}
                   disabled={isProcessing}
-                  className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                  className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-3.5 sm:px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 min-h-[44px]"
                 >
                   {isProcessing ? (
                     <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
                       <span>Processing...</span>
                     </>
                   ) : (
                     <>
-                      <FileCheck className="h-4 w-4" />
-                      <span>
+                      <FileCheck className="h-4 w-4 shrink-0" />
+                      <span className="truncate">
                         {tool.id === 'image-to-pdf'
                           ? `Compile ${files.length} Images to PDF`
                           : `Process ${tool.name}`}
@@ -1461,8 +1619,9 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                   )}
                 </button>
                 <button
+                  type="button"
                   onClick={handleReset}
-                  className="rounded-xl border border-slate-200/80 px-4 py-3 text-xs sm:text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+                  className="rounded-xl border border-slate-200/80 px-4 py-3 text-xs sm:text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors min-h-[44px] flex items-center justify-center"
                 >
                   Reset
                 </button>
@@ -1543,14 +1702,54 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                       </div>
                     </div>
 
-                    <a
-                      href={result.url}
-                      download={result.fileName}
-                      className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors"
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                      {/* Secondary Download All button if multiple results are ready */}
+                      {Object.keys(batchResults).length > 1 && (
+                        <button
+                          type="button"
+                          onClick={handleDownloadAllBatch}
+                          disabled={isDownloadingZip}
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors min-h-[42px]"
+                        >
+                          {isDownloadingZip ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                              Packaging ZIP...
+                            </>
+                          ) : (
+                            <>
+                              <FileArchive className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                              Download All ({Object.keys(batchResults).length} ZIP)
+                            </>
+                          )}
+                        </button>
+                      )}
+
+                      <a
+                        href={result.url}
+                        download={result.fileName}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors min-h-[42px]"
+                      >
+                        <Download className="h-4 w-4" />
+                        Download Result
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                {/* Batch Download Error Banner */}
+                {batchDownloadError && (
+                  <div className="mt-3 flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="h-4 w-4 shrink-0 text-rose-500" />
+                      <span>{batchDownloadError}</span>
+                    </div>
+                    <button
+                      onClick={() => setBatchDownloadError(null)}
+                      className="ml-2 font-bold text-rose-500 hover:text-rose-700"
                     >
-                      <Download className="h-4 w-4" />
-                      Download Result
-                    </a>
+                      ✕
+                    </button>
                   </div>
                 )}
               </div>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileSearch, Copy, Download, Sparkles, Check, RefreshCw, Languages, FileText } from 'lucide-react';
+import { FileSearch, Copy, Download, Sparkles, Check, RefreshCw, Languages, FileText, AlertCircle } from 'lucide-react';
 import { createWorker } from 'tesseract.js';
 import { Dropzone } from '../common/Dropzone';
 
@@ -13,18 +13,21 @@ export const OcrToolView: React.FC = () => {
   const [language, setLanguage] = useState<'eng' | 'spa' | 'fra' | 'deu'>('eng');
   const [useAiVision, setUseAiVision] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleFile = (files: File[]) => {
     if (files.length > 0) {
       setSelectedFile(files[0]);
       setPreviewUrl(URL.createObjectURL(files[0]));
       setExtractedText('');
+      setErrorMessage(null);
     }
   };
 
   const handleExtract = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || isProcessing) return;
     setIsProcessing(true);
+    setErrorMessage(null);
     setProgress(0);
 
     try {
@@ -49,6 +52,8 @@ export const OcrToolView: React.FC = () => {
             const data = await resp.json();
             if (data.text) {
               setExtractedText(data.text);
+              setIsProcessing(false);
+              setProgress(100);
             } else {
               throw new Error(data.error || 'AI OCR could not find text.');
             }
@@ -56,35 +61,54 @@ export const OcrToolView: React.FC = () => {
             console.warn('AI OCR fallback to Tesseract:', err);
             // Fallback to client-side OCR
             await runTesseract();
-          } finally {
-            setIsProcessing(false);
-            setProgress(100);
           }
+        };
+        reader.onerror = () => {
+          setErrorMessage('Failed to read image file. Please try selecting the image again.');
+          setIsProcessing(false);
+          setProgress(0);
         };
       } else {
         await runTesseract();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('OCR extraction failed. Please try a clearer image.');
+      setErrorMessage(err?.message || 'OCR extraction failed. Could not initialize language models or recognize text.');
       setIsProcessing(false);
+      setProgress(0);
     }
   };
 
   const runTesseract = async () => {
     if (!selectedFile) return;
-    setProgressStatus('Initializing OCR engine...');
-    setProgress(15);
+    try {
+      setProgressStatus('Initializing OCR engine & language models...');
+      setProgress(15);
 
-    const worker = await createWorker(language);
-    setProgressStatus('Recognizing text characters...');
-    setProgress(50);
+      const worker = await createWorker(language);
+      setProgressStatus('Recognizing text characters...');
+      setProgress(50);
 
-    const ret = await worker.recognize(selectedFile);
-    setExtractedText(ret.data.text);
-    await worker.terminate();
-    setIsProcessing(false);
-    setProgress(100);
+      const ret = await worker.recognize(selectedFile);
+      setExtractedText(ret.data.text);
+      await worker.terminate();
+      setIsProcessing(false);
+      setProgress(100);
+    } catch (err: any) {
+      console.error('Tesseract error:', err);
+      setErrorMessage(err?.message || 'Failed to initialize OCR engine or extract text. Please check your network connection and try again.');
+      setIsProcessing(false);
+      setProgress(0);
+    }
+  };
+
+  const handleReset = () => {
+    setSelectedFile(null);
+    setPreviewUrl(null);
+    setExtractedText('');
+    setErrorMessage(null);
+    setProgress(0);
+    setProgressStatus('');
   };
 
   const handleCopy = () => {
@@ -177,31 +201,49 @@ export const OcrToolView: React.FC = () => {
                 </div>
               )}
 
+              {/* Error Alert with Try Again */}
+              {errorMessage && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 sm:p-3.5 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300 flex flex-col xs:flex-row xs:items-center justify-between gap-2.5">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                    <span className="break-words">{errorMessage}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExtract}
+                    disabled={isProcessing}
+                    className="self-start xs:self-auto shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50 transition-colors text-xs shadow-2xs"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isProcessing ? 'animate-spin' : ''}`} />
+                    Try Again
+                  </button>
+                </div>
+              )}
+
               {/* Action buttons */}
-              <div className="pt-2 flex gap-3">
+              <div className="pt-2 flex flex-col xs:flex-row gap-2 sm:gap-3">
                 <button
+                  type="button"
                   onClick={handleExtract}
                   disabled={isProcessing}
-                  className="flex-1 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                  className="flex-1 rounded-xl bg-indigo-600 px-4 py-3 text-xs sm:text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 min-h-[44px]"
                 >
                   {isProcessing ? (
                     <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      Scanning ({progress}%)
+                      <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
+                      <span>Scanning ({progress}%)</span>
                     </>
                   ) : (
                     <>
-                      <FileSearch className="h-4 w-4" />
-                      Extract Text
+                      <FileSearch className="h-4 w-4 shrink-0" />
+                      <span>Extract Text</span>
                     </>
                   )}
                 </button>
                 <button
-                  onClick={() => {
-                    setSelectedFile(null);
-                    setExtractedText('');
-                  }}
-                  className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800"
+                  type="button"
+                  onClick={handleReset}
+                  className="rounded-xl border border-slate-200 px-4 py-3 text-xs sm:text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 min-h-[44px] flex items-center justify-center"
                 >
                   Reset
                 </button>

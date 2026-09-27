@@ -17,34 +17,38 @@ interface ToolsSectionProps {
 
 interface CompactToolCardProps {
   tool: ToolItem;
-  customDesc?: string;
   onClick: () => void;
 }
 
+/**
+ * Modern Launcher-Style Compact Tool Card
+ * - Compact square/launcher form factor
+ * - Vertically centered icon and title
+ * - Title capped at max 2 lines
+ * - Subtle hover (desktop) & active/tap (mobile) states
+ * - Fully accessible keyboard focus ring
+ * - Retains Pixora slate/indigo theme without unnecessary gradients
+ */
 const CompactToolCard: React.FC<CompactToolCardProps> = ({
   tool,
-  customDesc,
   onClick,
 }) => {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className="group relative flex flex-col items-center justify-between text-center rounded-2xl border border-slate-200/80 bg-white p-3.5 sm:p-4 shadow-2xs hover:border-indigo-400 hover:shadow-md hover:-translate-y-1 active:translate-y-0 active:scale-[0.98] transition-all duration-200 dark:border-slate-800/80 dark:bg-slate-900/90 dark:hover:border-indigo-500/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 min-h-[120px] sm:min-h-[128px] w-full cursor-pointer"
+      className="group relative flex flex-col items-center justify-center text-center rounded-xl sm:rounded-2xl border border-slate-200/90 bg-white p-3 sm:p-3.5 shadow-xs hover:border-indigo-400/80 hover:bg-slate-50/60 hover:shadow-sm active:bg-slate-100 active:scale-[0.98] transition-all duration-150 dark:border-slate-800/90 dark:bg-slate-900/90 dark:hover:border-indigo-500/60 dark:hover:bg-slate-800/50 dark:active:bg-slate-800 min-h-[96px] sm:min-h-[104px] w-full cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-950 overflow-hidden"
       title={`${tool.name} — ${tool.shortDesc}`}
+      aria-label={tool.name}
     >
-      {/* Icon inside small rounded container */}
-      <div className="flex h-10 w-10 sm:h-11 sm:w-11 items-center justify-center rounded-xl bg-slate-50 text-indigo-600 border border-slate-100 shadow-2xs group-hover:scale-105 group-hover:bg-indigo-50 group-hover:text-indigo-600 dark:bg-slate-800/90 dark:text-indigo-400 dark:border-slate-700/60 dark:group-hover:bg-indigo-950/60 dark:group-hover:text-indigo-300 transition-all duration-200 shrink-0">
-        <IconRenderer name={tool.icon} className="h-5 w-5" />
+      {/* Centered Icon inside small rounded container */}
+      <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg sm:rounded-xl bg-slate-100/90 text-indigo-600 border border-slate-200/60 group-hover:scale-105 group-hover:bg-indigo-50 group-hover:text-indigo-600 group-hover:border-indigo-100 dark:bg-slate-800 dark:text-indigo-400 dark:border-slate-700/60 dark:group-hover:bg-indigo-950/70 dark:group-hover:text-indigo-300 dark:group-hover:border-indigo-800/60 transition-transform duration-150 shrink-0">
+        <IconRenderer name={tool.icon} className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
       </div>
 
-      {/* Tool Name */}
-      <span className="mt-2 text-xs sm:text-[13px] font-bold text-slate-800 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-tight line-clamp-2 px-0.5">
+      {/* Tool Name: maximum 2 lines, vertically centered with proper line-height */}
+      <span className="mt-2 text-xs sm:text-[13px] font-medium text-slate-800 dark:text-slate-200 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-snug line-clamp-2 px-0.5 break-words">
         {tool.name}
-      </span>
-
-      {/* Optional Short 1-line description */}
-      <span className="mt-0.5 text-[10px] sm:text-[11px] text-slate-400 dark:text-slate-500 line-clamp-1 w-full px-0.5">
-        {customDesc || tool.shortDesc}
       </span>
     </button>
   );
@@ -152,13 +156,12 @@ export const ToolsSection: React.FC<ToolsSectionProps> = ({
           </button>
         </div>
 
-        {/* Compact Grid: 6 on Desktop, 4 on Tablet, 2 on Mobile */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
-          {validTools.map(({ tool, desc }) => (
+        {/* Compact Launcher Grid: Mobile 2 cols, Tablet 4 cols, Desktop/Large Desktop 6 cols */}
+        <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2.5 sm:gap-3.5">
+          {validTools.map(({ tool }) => (
             <CompactToolCard
               key={`${title}-${tool.id}`}
               tool={tool}
-              customDesc={desc}
               onClick={() => onSelectTool(tool)}
             />
           ))}

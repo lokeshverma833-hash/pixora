@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Download, RefreshCw, CheckCircle, Sliders, Printer, Shield } from 'lucide-react';
 import { Dropzone } from '../common/Dropzone';
+import { InlineAlert } from '../common/InlineAlert';
 import { generatePassportPhoto, formatBytes } from '../../utils/imageProcessors';
 import { ProcessingResult } from '../../types';
 
@@ -21,18 +22,51 @@ export const PassportPhotoView: React.FC = () => {
   const [sheetType, setSheetType] = useState<'single' | 'sheet4x6' | 'sheetA4'>('single');
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const originalUrlRef = useRef<string | null>(null);
+  const resultRef = useRef<ProcessingResult | null>(null);
+
+  useEffect(() => {
+    originalUrlRef.current = originalUrl;
+  }, [originalUrl]);
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
+    };
+  }, []);
 
   const handleFile = (files: File[]) => {
     if (files.length > 0) {
+      if (originalUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(originalUrlRef.current);
+      }
+      if (resultRef.current?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
+      const url = URL.createObjectURL(files[0]);
       setSelectedFile(files[0]);
-      setOriginalUrl(URL.createObjectURL(files[0]));
+      setOriginalUrl(url);
       setResult(null);
+      setErrorMessage(null);
     }
   };
 
   const handleProcess = async () => {
     if (!selectedFile) return;
     setIsProcessing(true);
+    setErrorMessage(null);
     try {
       const res = await generatePassportPhoto(selectedFile, {
         widthMm: selectedPreset.wMm,
@@ -41,19 +75,31 @@ export const PassportPhotoView: React.FC = () => {
         bgColor,
         sheetType,
       });
+      if (resultRef.current?.url?.startsWith('blob:') && resultRef.current.url !== res.url) {
+        URL.revokeObjectURL(resultRef.current.url);
+      }
       setResult(res);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Failed to generate passport photo.');
+      setErrorMessage(err?.message || 'Failed to generate passport photo. Please try a different image.');
     } finally {
       setIsProcessing(false);
     }
   };
 
   const handleReset = () => {
+    if (originalUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(originalUrlRef.current);
+      originalUrlRef.current = null;
+    }
+    if (resultRef.current?.url?.startsWith('blob:')) {
+      URL.revokeObjectURL(resultRef.current.url);
+      resultRef.current = null;
+    }
     setSelectedFile(null);
     setOriginalUrl(null);
     setResult(null);
+    setErrorMessage(null);
   };
 
   return (
@@ -170,6 +216,14 @@ export const PassportPhotoView: React.FC = () => {
                 ))}
               </div>
             </div>
+
+            {/* Error Notification */}
+            {errorMessage && (
+              <InlineAlert
+                message={errorMessage}
+                onDismiss={() => setErrorMessage(null)}
+              />
+            )}
 
             {/* Action Buttons */}
             <div className="pt-2 flex gap-3">

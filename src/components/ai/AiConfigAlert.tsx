@@ -4,9 +4,16 @@ import { KeyRound, ShieldAlert, ExternalLink, RefreshCw } from 'lucide-react';
 interface AiConfigAlertProps {
   onRetry?: () => void;
   isRetrying?: boolean;
+  hasLocalFallback?: boolean;
+  toolName?: string;
 }
 
-export const AiConfigAlert: React.FC<AiConfigAlertProps> = ({ onRetry, isRetrying }) => {
+export const AiConfigAlert: React.FC<AiConfigAlertProps> = ({
+  onRetry,
+  isRetrying,
+  hasLocalFallback,
+  toolName,
+}) => {
   return (
     <div className="rounded-3xl border border-amber-200 bg-amber-50/70 p-6 dark:border-amber-900/60 dark:bg-amber-950/30 text-amber-950 dark:text-amber-200 shadow-2xs space-y-4">
       <div className="flex items-start gap-3.5">
@@ -15,10 +22,24 @@ export const AiConfigAlert: React.FC<AiConfigAlertProps> = ({ onRetry, isRetryin
         </div>
         <div className="space-y-1">
           <h4 className="font-display text-sm sm:text-base font-bold text-amber-900 dark:text-amber-100">
-            AI Model Secret Not Configured
+            {hasLocalFallback
+              ? 'AI Model Secret Not Configured (Local Mode Available)'
+              : 'AI Model Secret Required'}
           </h4>
           <p className="text-xs text-amber-800/90 dark:text-amber-300/90 leading-relaxed max-w-xl">
-            This AI tool uses secure server-side models for neural processing (photo enhancement, segmentation, and deconvolution). To enable live AI execution without simulated outputs, configure your API secret in your deployment environment.
+            {hasLocalFallback ? (
+              <>
+                <strong>{toolName || 'This tool'}</strong> includes a genuine in-browser
+                algorithmic processor. You can run it right now using local processing, or
+                configure your Gemini API secret for server-side neural enhancements.
+              </>
+            ) : (
+              <>
+                <strong>{toolName || 'This tool'}</strong> requires server-side neural processing.
+                Because no true local equivalent exists, an API secret is required to process
+                images.
+              </>
+            )}
           </p>
         </div>
       </div>

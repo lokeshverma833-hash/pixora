@@ -9,18 +9,132 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
+export const MAX_CANVAS_DIMENSION = 4096;
+export const MAX_CANVAS_PIXELS = 16777216; // 16 Megapixels (~4096 x 4096)
+
+export interface SafeDimensionsResult {
+  width: number;
+  height: number;
+  scaled: boolean;
+  scale: number;
+}
+
+/**
+ * Calculates safe working dimensions preserving aspect ratio while ensuring the canvas
+ * does not exceed browser memory or hardware allocation ceilings (4096px / 16MP).
+ */
+export function calculateSafeDimensions(
+  width: number,
+  height: number,
+  maxDimension = MAX_CANVAS_DIMENSION,
+  maxPixels = MAX_CANVAS_PIXELS
+): SafeDimensionsResult {
+  if (width <= 0 || height <= 0) {
+    return { width: Math.max(1, width), height: Math.max(1, height), scaled: false, scale: 1.0 };
+  }
+
+  let scale = 1.0;
+
+  // Constrain max single dimension
+  if (width > maxDimension || height > maxDimension) {
+    scale = Math.min(maxDimension / width, maxDimension / height);
+  }
+
+  // Constrain total pixel area
+  const currentPixels = (width * scale) * (height * scale);
+  if (currentPixels > maxPixels) {
+    const pixelScale = Math.sqrt(maxPixels / currentPixels);
+    scale = scale * pixelScale;
+  }
+
+  if (scale < 0.999) {
+    const safeW = Math.max(1, Math.round(width * scale));
+    const safeH = Math.max(1, Math.round(height * scale));
+    return { width: safeW, height: safeH, scaled: true, scale };
+  }
+
+  return { width, height, scaled: false, scale: 1.0 };
+}
+
 export function loadImage(fileOrBlob: File | Blob | string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = (e) => reject(new Error('Failed to load image file.'));
+    let blobUrl: string | null = null;
+    img.onload = () => {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+      }
+      resolve(img);
+    };
+    img.onerror = () => {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+      }
+      reject(new Error('Failed to load image file. Please verify it is a valid, supported image.'));
+    };
     if (typeof fileOrBlob === 'string') {
       img.src = fileOrBlob;
     } else {
-      img.src = URL.createObjectURL(fileOrBlob);
+      blobUrl = URL.createObjectURL(fileOrBlob);
+      img.src = blobUrl;
     }
   });
+}
+
+export interface SafeImageSource {
+  source: HTMLImageElement | HTMLCanvasElement;
+  width: number;
+  height: number;
+  originalWidth: number;
+  originalHeight: number;
+  wasScaled: boolean;
+}
+
+/**
+ * Loads an image and ensures it is within safe working limits. If the image exceeds
+ * 4096px or 16MP, it is pre-downscaled onto a high-quality intermediate canvas before
+ * expensive filtering or pixel array operations occur.
+ */
+export async function loadSafeImage(
+  fileOrBlob: File | Blob | string,
+  maxDimension = MAX_CANVAS_DIMENSION,
+  maxPixels = MAX_CANVAS_PIXELS
+): Promise<SafeImageSource> {
+  const img = await loadImage(fileOrBlob);
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+
+  const safe = calculateSafeDimensions(origW, origH, maxDimension, maxPixels);
+
+  if (!safe.scaled) {
+    return {
+      source: img,
+      width: origW,
+      height: origH,
+      originalWidth: origW,
+      originalHeight: origH,
+      wasScaled: false,
+    };
+  }
+
+  // Pre-downscale oversized image onto a safe canvas with high-quality smoothing
+  const canvas = document.createElement('canvas');
+  canvas.width = safe.width;
+  canvas.height = safe.height;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, safe.width, safe.height);
+
+  return {
+    source: canvas,
+    width: safe.width,
+    height: safe.height,
+    originalWidth: origW,
+    originalHeight: origH,
+    wasScaled: true,
+  };
 }
 
 function canvasToProcessingResult(
@@ -70,17 +184,17 @@ export async function compressImage(
   quality: number, // 0.01 - 1.0
   format = 'image/jpeg'
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
   
   // Smart scale for very low quality requests to achieve true file-size reduction
   let scale = 1.0;
-  if (quality < 0.5 && (img.naturalWidth > 1600 || img.naturalHeight > 1600)) {
+  if (quality < 0.5 && (safeImg.width > 1600 || safeImg.height > 1600)) {
     scale = 0.8;
   }
   
-  canvas.width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
-  canvas.height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+  canvas.width = Math.max(1, Math.round(safeImg.width * scale));
+  canvas.height = Math.max(1, Math.round(safeImg.height * scale));
   const ctx = canvas.getContext('2d')!;
 
   ctx.imageSmoothingEnabled = true;
@@ -90,7 +204,7 @@ export async function compressImage(
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
   // For PNG, HTML5 Canvas toBlob ignores the quality parameter.
   // We apply real color-quantization & palette dithering so PNG file sizes actually drop!
@@ -129,10 +243,11 @@ export async function resizeImage(
     quality?: number;
   }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
+  const safeTarget = calculateSafeDimensions(options.width, options.height);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(options.width));
-  canvas.height = Math.max(1, Math.round(options.height));
+  canvas.width = Math.max(1, Math.round(safeTarget.width));
+  canvas.height = Math.max(1, Math.round(safeTarget.height));
   const ctx = canvas.getContext('2d')!;
 
   ctx.imageSmoothingEnabled = true;
@@ -143,7 +258,7 @@ export async function resizeImage(
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
   return canvasToProcessingResult(canvas, file, format, options.quality ?? 0.92);
 }
@@ -153,7 +268,7 @@ export async function resizeImage(
  */
 export async function resizeToTargetKB(file: File, targetKB: number): Promise<ProcessingResult> {
   const targetBytes = targetKB * 1024;
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
 
   let currentScale = 1.0;
   let minQuality = 0.05;
@@ -163,12 +278,12 @@ export async function resizeToTargetKB(file: File, targetKB: number): Promise<Pr
   // If original is already smaller than target, still generate clean output
   for (let pass = 0; pass < 3; pass++) {
     const canvas = document.createElement('canvas');
-    canvas.width = Math.max(20, Math.round(img.naturalWidth * currentScale));
-    canvas.height = Math.max(20, Math.round(img.naturalHeight * currentScale));
+    canvas.width = Math.max(20, Math.round(safeImg.width * currentScale));
+    canvas.height = Math.max(20, Math.round(safeImg.height * currentScale));
     const ctx = canvas.getContext('2d')!;
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
     // Binary search for quality
     let low = minQuality;
@@ -208,10 +323,14 @@ export async function cropImage(
   format = 'image/jpeg'
 ): Promise<ProcessingResult> {
   const img = await loadImage(file);
+  const safeCrop = calculateSafeDimensions(cropBox.width, cropBox.height);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(cropBox.width));
-  canvas.height = Math.max(1, Math.round(cropBox.height));
+  canvas.width = Math.max(1, Math.round(safeCrop.width));
+  canvas.height = Math.max(1, Math.round(safeCrop.height));
   const ctx = canvas.getContext('2d')!;
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   if (format === 'image/jpeg') {
     ctx.fillStyle = '#FFFFFF';
@@ -239,8 +358,8 @@ export async function circleCrop(
   file: File,
   options: { bgColor?: string; transparent: boolean; zoom?: number }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
-  const size = Math.min(img.naturalWidth, img.naturalHeight);
+  const safeImg = await loadSafeImage(file);
+  const size = Math.min(safeImg.width, safeImg.height);
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -257,9 +376,9 @@ export async function circleCrop(
   ctx.closePath();
   ctx.clip();
 
-  const offsetX = (img.naturalWidth - size) / 2;
-  const offsetY = (img.naturalHeight - size) / 2;
-  ctx.drawImage(img, offsetX, offsetY, size, size, 0, 0, size, size);
+  const offsetX = (safeImg.width - size) / 2;
+  const offsetY = (safeImg.height - size) / 2;
+  ctx.drawImage(safeImg.source, offsetX, offsetY, size, size, 0, 0, size, size);
   ctx.restore();
 
   return canvasToProcessingResult(canvas, file, 'image/png');
@@ -272,9 +391,9 @@ export async function squareCrop(
   file: File,
   options: { mode: 'crop' | 'pad'; bgColor?: string }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
-  const w = img.naturalWidth;
-  const h = img.naturalHeight;
+  const safeImg = await loadSafeImage(file);
+  const w = safeImg.width;
+  const h = safeImg.height;
   const canvas = document.createElement('canvas');
 
   if (options.mode === 'crop') {
@@ -284,10 +403,11 @@ export async function squareCrop(
     const ctx = canvas.getContext('2d')!;
     const sx = (w - size) / 2;
     const sy = (h - size) / 2;
-    ctx.drawImage(img, sx, sy, size, size, 0, 0, size, size);
+    ctx.drawImage(safeImg.source, sx, sy, size, size, 0, 0, size, size);
   } else {
     // Pad
-    const size = Math.max(w, h);
+    const safePad = calculateSafeDimensions(Math.max(w, h), Math.max(w, h));
+    const size = safePad.width;
     canvas.width = size;
     canvas.height = size;
     const ctx = canvas.getContext('2d')!;
@@ -295,7 +415,7 @@ export async function squareCrop(
     ctx.fillRect(0, 0, size, size);
     const dx = (size - w) / 2;
     const dy = (size - h) / 2;
-    ctx.drawImage(img, dx, dy);
+    ctx.drawImage(safeImg.source, dx, dy);
   }
 
   return canvasToProcessingResult(canvas, file, 'image/jpeg', 0.95);
@@ -311,12 +431,11 @@ export async function changeAspectRatio(
   mode: 'cover' | 'contain',
   bgColor = '#FFFFFF'
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
-  const w = img.naturalWidth;
-  const h = img.naturalHeight;
+  const safeImg = await loadSafeImage(file);
+  const w = safeImg.width;
+  const h = safeImg.height;
   const targetRatio = ratioW / ratioH;
 
-  const canvas = document.createElement('canvas');
   let targetWidth = w;
   let targetHeight = Math.round(w / targetRatio);
 
@@ -328,14 +447,6 @@ export async function changeAspectRatio(
       targetHeight = h;
       targetWidth = Math.round(h * targetRatio);
     }
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, targetWidth, targetHeight);
-    const dx = (targetWidth - w) / 2;
-    const dy = (targetHeight - h) / 2;
-    ctx.drawImage(img, dx, dy);
   } else {
     // Cover & crop
     if (w / h > targetRatio) {
@@ -345,12 +456,27 @@ export async function changeAspectRatio(
       targetWidth = w;
       targetHeight = Math.round(w / targetRatio);
     }
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    const ctx = canvas.getContext('2d')!;
+  }
+
+  const safeTarget = calculateSafeDimensions(targetWidth, targetHeight);
+  const canvas = document.createElement('canvas');
+  canvas.width = safeTarget.width;
+  canvas.height = safeTarget.height;
+  const ctx = canvas.getContext('2d')!;
+
+  if (mode === 'contain') {
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const scale = safeTarget.width / targetWidth;
+    const scaledW = w * scale;
+    const scaledH = h * scale;
+    const dx = (canvas.width - scaledW) / 2;
+    const dy = (canvas.height - scaledH) / 2;
+    ctx.drawImage(safeImg.source, dx, dy, scaledW, scaledH);
+  } else {
     const sx = Math.max(0, (w - targetWidth) / 2);
     const sy = Math.max(0, (h - targetHeight) / 2);
-    ctx.drawImage(img, sx, sy, targetWidth, targetHeight, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(safeImg.source, sx, sy, targetWidth, targetHeight, 0, 0, canvas.width, canvas.height);
   }
 
   return canvasToProcessingResult(canvas, file, 'image/jpeg', 0.94);
@@ -360,7 +486,7 @@ export async function changeAspectRatio(
  * 8. Rotate Image
  */
 export async function rotateImage(file: File, angleDegrees: number): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d')!;
 
@@ -368,15 +494,16 @@ export async function rotateImage(file: File, angleDegrees: number): Promise<Pro
   const sin = Math.abs(Math.sin(rad));
   const cos = Math.abs(Math.cos(rad));
 
-  const newWidth = Math.round(img.naturalWidth * cos + img.naturalHeight * sin);
-  const newHeight = Math.round(img.naturalWidth * sin + img.naturalHeight * cos);
+  const rawWidth = Math.round(safeImg.width * cos + safeImg.height * sin);
+  const rawHeight = Math.round(safeImg.width * sin + safeImg.height * cos);
+  const safeDim = calculateSafeDimensions(rawWidth, rawHeight);
 
-  canvas.width = newWidth;
-  canvas.height = newHeight;
+  canvas.width = safeDim.width;
+  canvas.height = safeDim.height;
 
-  ctx.translate(newWidth / 2, newHeight / 2);
+  ctx.translate(canvas.width / 2, canvas.height / 2);
   ctx.rotate(rad);
-  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  ctx.drawImage(safeImg.source, -safeImg.width / 2, -safeImg.height / 2);
 
   return canvasToProcessingResult(canvas, file, 'image/png');
 }
@@ -389,16 +516,16 @@ export async function flipImage(
   horizontal: boolean,
   vertical: boolean
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
   ctx.save();
   ctx.translate(horizontal ? canvas.width : 0, vertical ? canvas.height : 0);
   ctx.scale(horizontal ? -1 : 1, vertical ? -1 : 1);
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
   ctx.restore();
 
   return canvasToProcessingResult(canvas, file, 'image/png');
@@ -413,10 +540,10 @@ export async function roundCorners(
   transparent = true,
   bgColor = '#FFFFFF'
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
   if (!transparent) {
@@ -439,7 +566,7 @@ export async function roundCorners(
   ctx.closePath();
   ctx.clip();
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
   ctx.restore();
 
   return canvasToProcessingResult(canvas, file, transparent ? 'image/png' : 'image/jpeg', 0.95);
@@ -454,17 +581,17 @@ export async function convertFormat(
   quality = 0.92,
   bgColor = '#FFFFFF'
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
   if (targetMime === 'image/jpeg') {
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
 
   return canvasToProcessingResult(canvas, file, targetMime, quality);
 }
@@ -482,7 +609,7 @@ export async function generatePassportPhoto(
     sheetType: 'single' | 'sheet4x6' | 'sheetA4';
   }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const mmToInch = 1 / 25.4;
   const photoW = Math.round(options.widthMm * mmToInch * options.dpi);
   const photoH = Math.round(options.heightMm * mmToInch * options.dpi);
@@ -498,22 +625,22 @@ export async function generatePassportPhoto(
   cutCtx.fillRect(0, 0, photoW, photoH);
 
   // Center fit image with slight top bias for head alignment
-  const imgRatio = img.naturalWidth / img.naturalHeight;
+  const imgRatio = safeImg.width / safeImg.height;
   const targetRatio = photoW / photoH;
-  let sw = img.naturalWidth;
-  let sh = img.naturalHeight;
+  let sw = safeImg.width;
+  let sh = safeImg.height;
   let sx = 0;
   let sy = 0;
 
   if (imgRatio > targetRatio) {
-    sw = img.naturalHeight * targetRatio;
-    sx = (img.naturalWidth - sw) / 2;
+    sw = safeImg.height * targetRatio;
+    sx = (safeImg.width - sw) / 2;
   } else {
-    sh = img.naturalWidth / targetRatio;
-    sy = Math.max(0, (img.naturalHeight - sh) * 0.2); // top bias
+    sh = safeImg.width / targetRatio;
+    sy = Math.max(0, (safeImg.height - sh) * 0.2); // top bias
   }
 
-  cutCtx.drawImage(img, sx, sy, sw, sh, 0, 0, photoW, photoH);
+  cutCtx.drawImage(safeImg.source, sx, sy, sw, sh, 0, 0, photoW, photoH);
 
   if (options.sheetType === 'single') {
     return canvasToProcessingResult(cutCanvas, file, 'image/jpeg', 0.98, 'passport_photo_pixora.jpg');
@@ -575,7 +702,7 @@ export async function cleanSignature(
     targetHeight: number;
   }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, options.targetWidth);
   canvas.height = Math.max(1, options.targetHeight);
@@ -586,7 +713,7 @@ export async function cleanSignature(
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   // Draw scaled
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = imgData.data;
@@ -626,12 +753,12 @@ export async function cleanSignature(
  * 14. Remove Image Metadata (EXIF Stripper)
  */
 export async function removeMetadata(file: File): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
 
   const format = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
   return canvasToProcessingResult(canvas, file, format, 0.95, `${file.name.replace(/\.[^/.]+$/, '')}_clean.${format === 'image/png' ? 'png' : 'jpg'}`);
@@ -653,15 +780,15 @@ export async function applyAiEnhancement(
     shadows: number;
   }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
   // 1. Draw base with CSS filters for brightness, contrast, saturation
   ctx.filter = `brightness(${params.brightness}) contrast(${params.contrast}) saturate(${params.saturation})`;
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
   ctx.filter = 'none';
 
   // 2. High-pass sharpness & tonal corrections on pixel buffer
@@ -737,13 +864,13 @@ export async function removeBackground(
   file: File,
   options: { tolerance: number; bgColor: string; transparent: boolean }
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = imgData.data;
   const w = canvas.width;
@@ -794,13 +921,13 @@ export async function inpaintObject(
   file: File,
   maskCanvas: HTMLCanvasElement
 ): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
 
   // Resize mask to match canvas if needed
   const tempMask = document.createElement('canvas');
@@ -854,15 +981,19 @@ export async function inpaintObject(
  * 18. Image Upscaler (2x / 4x Super Resolution Interpolation)
  */
 export async function upscaleImage(file: File, scale: 2 | 4): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
+  const targetW = safeImg.width * scale;
+  const targetH = safeImg.height * scale;
+  const safeTarget = calculateSafeDimensions(targetW, targetH);
+
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth * scale;
-  canvas.height = img.naturalHeight * scale;
+  canvas.width = safeTarget.width;
+  canvas.height = safeTarget.height;
   const ctx = canvas.getContext('2d')!;
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
   // Apply edge-directed sharpening to recover high-frequency sharpness
   applySharpenFilter(ctx, canvas.width, canvas.height, 0.45 * scale);
@@ -874,15 +1005,15 @@ export async function upscaleImage(file: File, scale: 2 | 4): Promise<Processing
  * 19. Background Blur (Portrait Mode Bokeh)
  */
 export async function blurBackground(file: File, blurRadius: number): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
   // 1. Draw blurred background
   ctx.filter = `blur(${blurRadius}px)`;
-  ctx.drawImage(img, -blurRadius, -blurRadius, canvas.width + blurRadius * 2, canvas.height + blurRadius * 2);
+  ctx.drawImage(safeImg.source, -blurRadius, -blurRadius, canvas.width + blurRadius * 2, canvas.height + blurRadius * 2);
   ctx.filter = 'none';
 
   // 2. Draw centered subject vignette/oval clip mask
@@ -904,7 +1035,7 @@ export async function blurBackground(file: File, blurRadius: number): Promise<Pr
   );
   sCtx.closePath();
   sCtx.clip();
-  sCtx.drawImage(img, 0, 0);
+  sCtx.drawImage(safeImg.source, 0, 0);
   sCtx.restore();
 
   // Combine
@@ -917,13 +1048,13 @@ export async function blurBackground(file: File, blurRadius: number): Promise<Pr
  * 20. Image Unblur
  */
 export async function unblurImage(file: File, amount: number): Promise<ProcessingResult> {
-  const img = await loadImage(file);
+  const safeImg = await loadSafeImage(file);
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = safeImg.width;
+  canvas.height = safeImg.height;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(safeImg.source, 0, 0);
   applySharpenFilter(ctx, canvas.width, canvas.height, amount);
 
   return canvasToProcessingResult(canvas, file, 'image/jpeg', 0.95);

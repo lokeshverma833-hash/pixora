@@ -122,7 +122,7 @@ export const Dropzone: React.FC<DropzoneProps> = ({
         />
 
         {/* Inner Content */}
-        <div className="flex flex-col items-center justify-center p-8 sm:p-12 text-center space-y-4">
+        <div className="flex flex-col items-center justify-center p-5 sm:p-8 md:p-12 text-center space-y-3 sm:space-y-4">
           {/* Visual Icon Mark */}
           <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50/80 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 transition-all duration-300 group-hover:scale-105 group-hover:bg-indigo-600 group-hover:text-white dark:group-hover:bg-indigo-600 dark:group-hover:text-white border border-indigo-100/80 dark:border-indigo-900/60 shadow-2xs">
             <UploadCloud className="h-6 w-6 stroke-[1.9]" />
