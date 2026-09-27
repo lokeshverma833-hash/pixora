@@ -1,0 +1,211 @@
+/**
+ * Service to interface with secure server-side AI processing endpoints
+ */
+
+export interface AiServerStatus {
+  isConfigured: boolean;
+  provider: string;
+  model: string;
+  supportedTools: string[];
+}
+
+export interface AiEnhanceResponse {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  sharpness: number;
+  warmth: number;
+  vibrance: number;
+  highlights: number;
+  shadows: number;
+  analysis: string;
+  isAiPowered: boolean;
+  success?: boolean;
+}
+
+export interface AiBackgroundResponse {
+  subject: string;
+  backgroundType: string;
+  recommendedEdgeFeathering: number;
+  detectedBoundingBox?: {
+    topPercent: number;
+    bottomPercent: number;
+    leftPercent: number;
+    rightPercent: number;
+  };
+  summary: string;
+  success?: boolean;
+}
+
+export interface AiInpaintResponse {
+  contextAnalysis: string;
+  texturePattern: string;
+  inpaintingFeather: number;
+  status: string;
+  success?: boolean;
+}
+
+export interface AiUpscaleResponse {
+  noiseLevel: string;
+  compressionArtifactsDetected: boolean;
+  edgeSharpeningCoefficient: number;
+  denoiseStrength: number;
+  resolutionAdvice: string;
+  success?: boolean;
+}
+
+export interface AiBokehResponse {
+  subjectDepthPlane: string;
+  recommendedAperture: string;
+  blurTransitionGradient: number;
+  bokehQuality: string;
+  focusSummary: string;
+  success?: boolean;
+}
+
+export interface AiUnblurResponse {
+  blurType: string;
+  estimatedBlurAngle: number;
+  deconvolutionPasses: number;
+  edgeContrastBoost: number;
+  recoverySummary: string;
+  success?: boolean;
+}
+
+export class AiConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiConfigurationError';
+  }
+}
+
+/**
+ * Check if the server has AI API keys configured
+ */
+export async function checkAiServerStatus(): Promise<AiServerStatus> {
+  try {
+    const res = await fetch('/api/ai/status');
+    if (!res.ok) {
+      return {
+        isConfigured: false,
+        provider: 'Google Gemini',
+        model: 'gemini-3.8-flash',
+        supportedTools: [],
+      };
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn('Could not query AI status:', err);
+    return {
+      isConfigured: false,
+      provider: 'Google Gemini',
+      model: 'gemini-3.8-flash',
+      supportedTools: [],
+    };
+  }
+}
+
+/**
+ * Convert file to clean base64 data url
+ */
+export function fileToBase64(file: File | Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = (e) => reject(e);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Generic post helper with error classification
+ */
+async function postAiEndpoint<T>(endpoint: string, payload: any): Promise<T> {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (res.status === 503 || data.error === 'API_KEY_NOT_CONFIGURED') {
+    throw new AiConfigurationError(
+      data.message ||
+        'Gemini AI API key is not configured on the server. Please set GEMINI_API_KEY in your environment secrets.'
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(data.error || `Server AI processing failed (${res.status})`);
+  }
+
+  return data as T;
+}
+
+export async function requestAiEnhance(
+  imageBase64: string,
+  mimeType = 'image/jpeg'
+): Promise<AiEnhanceResponse> {
+  return postAiEndpoint<AiEnhanceResponse>('/api/ai/enhance', { imageBase64, mimeType });
+}
+
+export async function requestAiBackgroundRemoval(
+  imageBase64: string,
+  mimeType = 'image/jpeg',
+  tolerance = 30
+): Promise<AiBackgroundResponse> {
+  return postAiEndpoint<AiBackgroundResponse>('/api/ai/remove-background', {
+    imageBase64,
+    mimeType,
+    tolerance,
+  });
+}
+
+export async function requestAiObjectInpainting(
+  imageBase64: string,
+  mimeType = 'image/jpeg',
+  maskData?: string
+): Promise<AiInpaintResponse> {
+  return postAiEndpoint<AiInpaintResponse>('/api/ai/remove-object', {
+    imageBase64,
+    mimeType,
+    maskData,
+  });
+}
+
+export async function requestAiUpscale(
+  imageBase64: string,
+  mimeType = 'image/jpeg',
+  factor = 2
+): Promise<AiUpscaleResponse> {
+  return postAiEndpoint<AiUpscaleResponse>('/api/ai/upscale', {
+    imageBase64,
+    mimeType,
+    factor,
+  });
+}
+
+export async function requestAiBackgroundBlur(
+  imageBase64: string,
+  mimeType = 'image/jpeg',
+  blurRadius = 16
+): Promise<AiBokehResponse> {
+  return postAiEndpoint<AiBokehResponse>('/api/ai/blur-background', {
+    imageBase64,
+    mimeType,
+    blurRadius,
+  });
+}
+
+export async function requestAiUnblur(
+  imageBase64: string,
+  mimeType = 'image/jpeg',
+  intensity = 0.6
+): Promise<AiUnblurResponse> {
+  return postAiEndpoint<AiUnblurResponse>('/api/ai/unblur', {
+    imageBase64,
+    mimeType,
+    intensity,
+  });
+}
