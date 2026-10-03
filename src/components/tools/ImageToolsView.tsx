@@ -61,14 +61,17 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
 
   // Tool Specific Controls State
   // 1. Compression
-  const [quality, setQuality] = useState<number>(0.75);
+  const [quality, setQuality] = useState<number>(0.8);
   const [compressFormat, setCompressFormat] = useState<string>('auto');
+  const [compressTargetKb, setCompressTargetKb] = useState<number | ''>('');
 
   // 2. Resize
   const [width, setWidth] = useState<number>(800);
   const [height, setHeight] = useState<number>(600);
   const [lockAspect, setLockAspect] = useState<boolean>(true);
   const [scalePercent, setScalePercent] = useState<number>(100);
+  const [resizeFormat, setResizeFormat] = useState<'image/jpeg' | 'image/png' | 'image/webp'>('image/jpeg');
+  const [resizeTargetKb, setResizeTargetKb] = useState<number | ''>('');
 
   // 3. Target KB
   const [targetKb, setTargetKb] = useState<number>(50);
@@ -294,28 +297,44 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
 
   // Resize dimension controls
   const handleWidthChange = (newW: number) => {
-    setWidth(newW);
+    const val = Math.max(1, newW);
+    setWidth(val);
     if (lockAspect && originalDim.w > 0) {
       const ratio = originalDim.h / originalDim.w;
-      setHeight(Math.round(newW * ratio));
+      setHeight(Math.max(1, Math.round(val * ratio)));
+    }
+    // Gracefully sync or reset percentage chip highlight
+    if (originalDim.w > 0) {
+      const pct = Math.round((val / originalDim.w) * 100);
+      setScalePercent([25, 50, 75, 100, 150, 200].includes(pct) ? pct : 0);
+    } else {
+      setScalePercent(0);
     }
     setResult(null);
   };
 
   const handleHeightChange = (newH: number) => {
-    setHeight(newH);
+    const val = Math.max(1, newH);
+    setHeight(val);
     if (lockAspect && originalDim.h > 0) {
       const ratio = originalDim.w / originalDim.h;
-      setWidth(Math.round(newH * ratio));
+      setWidth(Math.max(1, Math.round(val * ratio)));
+    }
+    // Gracefully sync or reset percentage chip highlight
+    if (originalDim.h > 0) {
+      const pct = Math.round((val / originalDim.h) * 100);
+      setScalePercent([25, 50, 75, 100, 150, 200].includes(pct) ? pct : 0);
+    } else {
+      setScalePercent(0);
     }
     setResult(null);
   };
 
   const handleScalePercent = (pct: number) => {
     setScalePercent(pct);
-    if (originalDim.w > 0) {
-      setWidth(Math.round((originalDim.w * pct) / 100));
-      setHeight(Math.round((originalDim.h * pct) / 100));
+    if (originalDim.w > 0 && originalDim.h > 0) {
+      setWidth(Math.max(1, Math.round((originalDim.w * pct) / 100)));
+      setHeight(Math.max(1, Math.round((originalDim.h * pct) / 100)));
     }
     setResult(null);
   };
@@ -367,6 +386,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
   const processSingleFile = async (file: File, overrides?: {
     customQuality?: number;
     customFormat?: string;
+    customCompressTargetKb?: number | '';
     customWidth?: number;
     customHeight?: number;
     customTargetKb?: number;
@@ -380,6 +400,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
   }): Promise<ProcessingResult> => {
     const q = overrides?.customQuality !== undefined ? overrides.customQuality : quality;
     const cFmt = overrides?.customFormat !== undefined ? overrides.customFormat : compressFormat;
+    const cTargetKb = overrides?.customCompressTargetKb !== undefined ? overrides.customCompressTargetKb : compressTargetKb;
     const w = overrides?.customWidth !== undefined ? overrides.customWidth : width;
     const h = overrides?.customHeight !== undefined ? overrides.customHeight : height;
     const tKb = overrides?.customTargetKb !== undefined ? overrides.customTargetKb : targetKb;
@@ -394,12 +415,19 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
     switch (tool.id) {
       case 'compress-image': {
         const outFormat = cFmt === 'auto' ? file.type || 'image/jpeg' : cFmt;
-        return await compressImage(file, q, outFormat);
+        const targetK = typeof cTargetKb === 'number' && cTargetKb > 0 ? cTargetKb : undefined;
+        return await compressImage(file, q, outFormat, targetK);
       }
 
       case 'resize-image':
       case 'resize-image-pixels':
-        return await resizeImage(file, { width: w, height: h, quality: 0.92 });
+        return await resizeImage(file, {
+          width: w,
+          height: h,
+          format: resizeFormat,
+          targetKb: typeof resizeTargetKb === 'number' && resizeTargetKb > 0 ? resizeTargetKb : undefined,
+          quality: 0.92,
+        });
 
       case 'resize-image-kb':
         return await resizeToTargetKB(file, tKb);
@@ -474,13 +502,19 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
         if (resultRef.current?.url && resultRef.current.url !== res.url) {
           revokeBlobUrl(resultRef.current.url);
         }
+        resultRef.current = res;
         setResult(res);
       } else {
         const res = await processSingleFile(currentFile, overrides);
+        // Synchronously revoke previous blob URL for this tool/image run
+        if (resultRef.current?.url && resultRef.current.url !== res.url) {
+          revokeBlobUrl(resultRef.current.url);
+        }
         const prevForIndex = batchResultsRef.current[activeFileIndex]?.url;
-        if (prevForIndex && prevForIndex !== res.url) {
+        if (prevForIndex && prevForIndex !== res.url && prevForIndex !== resultRef.current?.url) {
           revokeBlobUrl(prevForIndex);
         }
+        resultRef.current = res;
         setResult(res);
         setBatchResults((prev) => ({ ...prev, [activeFileIndex]: res }));
       }
@@ -490,6 +524,20 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // Direct binary blob download handler (ensures byte-for-byte consistency with displayed UI size)
+  const handleDownloadResult = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!result || !result.blob) return;
+    e.preventDefault();
+    const downloadBlobUrl = URL.createObjectURL(result.blob);
+    const link = document.createElement('a');
+    link.href = downloadBlobUrl;
+    link.download = result.fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(downloadBlobUrl), 1000);
   };
 
   // Debounced Processing Helper
@@ -609,6 +657,11 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
           multiple={isMultiFileSupported}
           title={`Upload ${isMultiFileSupported ? 'Images' : 'Image'}`}
           subtitle={`Drag & drop JPG, PNG, WebP, AVIF ${isMultiFileSupported ? '(Multiple files supported)' : ''}`}
+          formatsText={
+            tool.id === 'image-to-pdf'
+              ? 'Supports JPG, PNG, WebP, AVIF, PDF (Up to 50MB)'
+              : 'Supports JPG, PNG, WebP, AVIF (Up to 50MB)'
+          }
           accept="image/jpeg,image/png,image/webp,image/avif,image/gif"
         />
       ) : (
@@ -775,7 +828,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
               {/* 1. Compress Image Controls */}
               {tool.id === 'compress-image' && (
                 <div className="space-y-4">
-
+                  {/* Smooth Quality Slider (10% to 100%, default 80%) */}
                   <div>
                     <div className="flex justify-between items-center text-xs font-semibold mb-1.5">
                       <span className="text-slate-700 dark:text-slate-300">Compression Quality</span>
@@ -785,42 +838,119 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                     </div>
                     <input
                       type="range"
-                      min="0.1"
-                      max="0.98"
-                      step="0.02"
+                      min="0.10"
+                      max="1.0"
+                      step="0.01"
                       value={quality}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value);
                         setQuality(val);
-                        debounceProcess({ customQuality: val }, 120);
+                        setCompressTargetKb('');
+                        debounceProcess({ customQuality: val, customCompressTargetKb: '' }, 100);
                       }}
                       className="w-full accent-indigo-600 cursor-pointer"
                     />
+                    <div className="flex justify-between text-[10px] text-slate-400 font-mono mt-1">
+                      <span>10% (Min size)</span>
+                      <span>50%</span>
+                      <span>80% (Default)</span>
+                      <span>100% (High quality)</span>
+                    </div>
                   </div>
 
-                  {/* Quality Presets */}
-                  <div className="grid grid-cols-2 xs:grid-cols-4 gap-1.5 text-xs">
-                    {[
-                      { label: 'Ultra (98%)', val: 0.98 },
-                      { label: 'High (85%)', val: 0.85 },
-                      { label: 'Balanced (70%)', val: 0.70 },
-                      { label: 'Max (45%)', val: 0.45 },
-                    ].map((preset) => (
-                      <button
-                        key={preset.label}
-                        onClick={() => {
-                          setQuality(preset.val);
-                          runProcessing({ customQuality: preset.val });
-                        }}
-                        className={`py-2 px-1.5 rounded-xl border text-center font-bold text-[11px] transition-all min-h-[36px] flex items-center justify-center ${
-                          Math.abs(quality - preset.val) < 0.04
-                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
-                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
+                  {/* Quick Preset Chips */}
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Compression Presets
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                      {[
+                        { label: 'Max Compression (low KB)', val: 0.45, desc: 'Smallest file size' },
+                        { label: 'Balanced (Recommended)', val: 0.80, desc: 'Ideal quality & ratio' },
+                        { label: 'High Quality', val: 0.95, desc: 'Minimal compression' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => {
+                            setQuality(preset.val);
+                            setCompressTargetKb('');
+                            runProcessing({ customQuality: preset.val, customCompressTargetKb: '' });
+                          }}
+                          className={`p-2.5 rounded-xl border text-left transition-all ${
+                            compressTargetKb === '' && Math.abs(quality - preset.val) < 0.05
+                              ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950/70 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
+                              : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700 bg-white dark:bg-slate-900/60'
+                          }`}
+                        >
+                          <div className="font-bold text-xs">{preset.label}</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{preset.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Optional Target Size (KB) Input */}
+                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/50 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Target File Size (KB) <span className="font-normal text-slate-400">(Optional)</span>
+                      </label>
+                      {compressTargetKb !== '' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCompressTargetKb('');
+                            runProcessing({ customCompressTargetKb: '', customQuality: quality });
+                          }}
+                          className="text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline"
+                        >
+                          Reset to Slider
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          type="number"
+                          min="10"
+                          max="25000"
+                          placeholder="e.g. 50, 100, 200"
+                          value={compressTargetKb}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? '' : Math.max(1, Number(e.target.value));
+                            setCompressTargetKb(val);
+                            debounceProcess({ customCompressTargetKb: val }, 250);
+                          }}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-slate-400">
+                          KB
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {[50, 100, 200].map((quickKb) => (
+                          <button
+                            key={quickKb}
+                            type="button"
+                            onClick={() => {
+                              setCompressTargetKb(quickKb);
+                              runProcessing({ customCompressTargetKb: quickKb });
+                            }}
+                            className={`rounded-lg border px-2.5 py-2 text-xs font-mono font-medium transition-all ${
+                              compressTargetKb === quickKb
+                                ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 font-bold'
+                                : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:border-slate-300'
+                            }`}
+                          >
+                            {quickKb}KB
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                      Auto-calculates compression quality and step-down scale in pure browser memory to reach your target size.
+                    </p>
                   </div>
 
                   {/* Output Format */}
@@ -830,20 +960,21 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                     </label>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                       {[
-                        { id: 'auto', label: 'Original' },
+                        { id: 'auto', label: 'Original Format' },
                         { id: 'image/webp', label: 'WebP (Smallest)' },
                         { id: 'image/jpeg', label: 'JPEG (Universal)' },
                       ].map((fmt) => (
                         <button
                           key={fmt.id}
+                          type="button"
                           onClick={() => {
                             setCompressFormat(fmt.id);
                             runProcessing({ customFormat: fmt.id });
                           }}
-                          className={`p-2 rounded-xl border text-center font-bold text-xs transition-all ${
+                          className={`p-2.5 rounded-xl border text-center font-bold text-xs transition-all ${
                             compressFormat === fmt.id
                               ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
-                              : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                              : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300 bg-white dark:bg-slate-900/60'
                           }`}
                         >
                           {fmt.label}
@@ -857,7 +988,7 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
               {/* 2. Resize Image & Resize Image by Pixels */}
               {(tool.id === 'resize-image' || tool.id === 'resize-image-pixels') && (
                 <div className="space-y-4">
-                  {/* Percentage Scale */}
+                  {/* Quick Percentage Scale */}
                   <div>
                     <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-2">
                       Quick Percentage Scale
@@ -877,6 +1008,34 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  {/* Preset Dimensions Dropdown */}
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                      Dimension Preset
+                    </label>
+                    <select
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val || val === 'custom') return;
+                        const [w, h] = val.split('x').map(Number);
+                        if (w && h) {
+                          setWidth(w);
+                          setHeight(h);
+                          setScalePercent(0);
+                          setResult(null);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2 text-xs text-slate-800 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200"
+                    >
+                      <option value="custom">Custom Dimensions</option>
+                      <option value="1080x1080">Instagram Square (1080 × 1080 px)</option>
+                      <option value="1080x1920">Instagram Story / Reel (1080 × 1920 px)</option>
+                      <option value="1280x720">Standard Web / YouTube (1280 × 720 px)</option>
+                      <option value="1920x1080">Full HD Landscape (1920 × 1080 px)</option>
+                      <option value="413x531">Passport Photo (413 × 531 px)</option>
+                    </select>
                   </div>
 
                   {/* Pixel Inputs */}
@@ -920,6 +1079,75 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
                     )}
                     <span>Maintain Aspect Ratio ({lockAspect ? 'Locked' : 'Unlocked'})</span>
                   </button>
+
+                  {/* Output Format & Target Size (KB) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                    {/* Output Format */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                        Output Format
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5 text-xs">
+                        {[
+                          { id: 'image/jpeg', label: 'JPG' },
+                          { id: 'image/png', label: 'PNG' },
+                          { id: 'image/webp', label: 'WebP' },
+                        ].map((fmt) => (
+                          <button
+                            key={fmt.id}
+                            type="button"
+                            onClick={() => {
+                              setResizeFormat(fmt.id as any);
+                              setResult(null);
+                            }}
+                            className={`py-1.5 rounded-lg border text-center font-medium transition-all ${
+                              resizeFormat === fmt.id
+                                ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-200 font-bold'
+                                : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                            }`}
+                          >
+                            {fmt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Target Size (KB) */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          Target Size (KB)
+                        </label>
+                        <span className="text-[10px] text-slate-400">Optional</span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="1"
+                          placeholder="e.g. 50, 100"
+                          value={resizeTargetKb}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? '' : Math.max(1, parseInt(e.target.value, 10));
+                            setResizeTargetKb(val);
+                            setResult(null);
+                          }}
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 dark:border-slate-800 dark:bg-slate-800 dark:text-white"
+                        />
+                        {typeof resizeTargetKb === 'number' && resizeTargetKb > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setResizeTargetKb('');
+                              setResult(null);
+                            }}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1678,63 +1906,95 @@ export const ImageToolsView: React.FC<ImageToolsViewProps> = ({ tool }) => {
 
                 {/* Result Information & Download Button */}
                 {result && (
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 text-xs">
-                    <div className="text-left space-y-1">
-                      <span className="font-bold text-slate-900 dark:text-white block truncate max-w-xs sm:max-w-sm">
-                        {result.fileName}
-                      </span>
-                      <div className="flex items-center gap-2 text-slate-500 font-mono tabular-nums">
-                        <span>{formatBytes(result.originalSize)}</span>
-                        <span>→</span>
-                        <span className="font-bold text-emerald-600 dark:text-emerald-400 text-sm">
-                          {formatBytes(result.fileSize)}
-                        </span>
-                        {result.fileSize < result.originalSize && (
-                          <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
-                            (-{Math.round((1 - result.fileSize / result.originalSize) * 100)}%)
-                          </span>
-                        )}
-                        {result.width && result.height && (
-                          <span className="text-slate-400 hidden sm:inline">
-                            · {result.width}×{result.height}px
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                  (() => {
+                    const actualBlobBytes = result.blob ? result.blob.size : result.fileSize;
+                    const formatSizeDisplay = (bytes: number): string => {
+                      if (bytes < 1024) return `${bytes} B`;
+                      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+                    };
 
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-                      {/* Secondary Download All button if multiple results are ready */}
-                      {Object.keys(batchResults).length > 1 && (
-                        <button
-                          type="button"
-                          onClick={handleDownloadAllBatch}
-                          disabled={isDownloadingZip}
-                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors min-h-[42px]"
-                        >
-                          {isDownloadingZip ? (
-                            <>
-                              <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
-                              Packaging ZIP...
-                            </>
-                          ) : (
-                            <>
-                              <FileArchive className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                              Download All ({Object.keys(batchResults).length} ZIP)
-                            </>
+                    return (
+                      <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 text-xs">
+                        <div className="text-left space-y-1">
+                          <span className="font-bold text-slate-900 dark:text-white block truncate max-w-xs sm:max-w-sm">
+                            {result.fileName}
+                          </span>
+                          <div className="flex flex-wrap items-center gap-2 text-slate-500 font-mono tabular-nums">
+                            <span>{formatSizeDisplay(result.originalSize)}</span>
+                            <span>→</span>
+                            {actualBlobBytes < result.originalSize ? (
+                              <>
+                                <span className="font-bold text-emerald-600 dark:text-emerald-400 text-sm">
+                                  {formatSizeDisplay(actualBlobBytes)}
+                                </span>
+                                <span className="rounded-full bg-emerald-100 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800 px-2 py-0.5 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                                  (-{Math.round((1 - actualBlobBytes / result.originalSize) * 100)}%)
+                                </span>
+                              </>
+                            ) : actualBlobBytes > result.originalSize ? (
+                              <>
+                                <span className="font-bold text-amber-600 dark:text-amber-400 text-sm">
+                                  {formatSizeDisplay(actualBlobBytes)}
+                                </span>
+                                <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                  (+{Math.round((actualBlobBytes / result.originalSize - 1) * 100)}%)
+                                </span>
+                              </>
+                            ) : (
+                              <span className="font-bold text-slate-700 dark:text-slate-300 text-sm">
+                                {formatSizeDisplay(actualBlobBytes)} (Same)
+                              </span>
+                            )}
+                            {result.width && result.height && (
+                              <span className="text-slate-400 hidden sm:inline">
+                                · {result.width}×{result.height}px
+                              </span>
+                            )}
+                            {result.blob?.type && (
+                              <span className="rounded bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
+                                {result.blob.type.replace('image/', '')}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                          {/* Secondary Download All button if multiple results are ready */}
+                          {Object.keys(batchResults).length > 1 && (
+                            <button
+                              type="button"
+                              onClick={handleDownloadAllBatch}
+                              disabled={isDownloadingZip}
+                              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors min-h-[42px]"
+                            >
+                              {isDownloadingZip ? (
+                                <>
+                                  <Loader2 className="h-4 w-4 animate-spin text-slate-500" />
+                                  Packaging ZIP...
+                                </>
+                              ) : (
+                                <>
+                                  <FileArchive className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                                  Download All ({Object.keys(batchResults).length} ZIP)
+                                </>
+                              )}
+                            </button>
                           )}
-                        </button>
-                      )}
 
-                      <a
-                        href={result.url}
-                        download={result.fileName}
-                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors min-h-[42px]"
-                      >
-                        <Download className="h-4 w-4" />
-                        Download Result
-                      </a>
-                    </div>
-                  </div>
+                          <a
+                            href={result.url}
+                            download={result.fileName}
+                            onClick={handleDownloadResult}
+                            className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors min-h-[42px]"
+                          >
+                            <Download className="h-4 w-4" />
+                            {tool.id === 'compress-image' ? 'Download Compressed Image' : 'Download Result'}
+                          </a>
+                        </div>
+                      </div>
+                    );
+                  })()
                 )}
 
                 {/* Batch Download Error Banner */}

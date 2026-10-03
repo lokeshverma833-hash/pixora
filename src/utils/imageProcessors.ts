@@ -1,4 +1,6 @@
 import { ProcessingResult } from '../types';
+export { PassportUtility } from './passportUtility';
+export type { GridPreset } from './passportUtility';
 
 export function formatBytes(bytes: number, decimals = 1): string {
   if (bytes === 0) return '0 B';
@@ -177,58 +179,188 @@ function canvasToProcessingResult(
 }
 
 /**
- * 1. Compress Image (Supports JPEG, WebP, and true PNG color-quantization compression)
+ * Step-down canvas resizer to avoid browser memory freeze on large images
+ * and eliminate high-ratio downsampling distortion.
+ */
+export function stepDownScaleCanvas(
+  source: HTMLImageElement | HTMLCanvasElement,
+  srcW: number,
+  srcH: number,
+  targetW: number,
+  targetH: number
+): HTMLCanvasElement {
+  let curW = srcW;
+  let curH = srcH;
+  let curCanvas: HTMLCanvasElement;
+
+  if (source instanceof HTMLCanvasElement) {
+    curCanvas = source;
+  } else {
+    curCanvas = document.createElement('canvas');
+    curCanvas.width = srcW;
+    curCanvas.height = srcH;
+    const ctx = curCanvas.getContext('2d')!;
+    ctx.drawImage(source, 0, 0);
+  }
+
+  // Iterative 50% step-down until close to target
+  while (curW * 0.5 > targetW && curH * 0.5 > targetH) {
+    const nextW = Math.max(targetW, Math.floor(curW * 0.5));
+    const nextH = Math.max(targetH, Math.floor(curH * 0.5));
+    const stepCanvas = document.createElement('canvas');
+    stepCanvas.width = nextW;
+    stepCanvas.height = nextH;
+    const stepCtx = stepCanvas.getContext('2d')!;
+    stepCtx.imageSmoothingEnabled = true;
+    stepCtx.imageSmoothingQuality = 'high';
+    stepCtx.drawImage(curCanvas, 0, 0, nextW, nextH);
+
+    curCanvas = stepCanvas;
+    curW = nextW;
+    curH = nextH;
+  }
+
+  // Final draw to exact target
+  if (curW !== targetW || curH !== targetH) {
+    const finalCanvas = document.createElement('canvas');
+    finalCanvas.width = targetW;
+    finalCanvas.height = targetH;
+    const finalCtx = finalCanvas.getContext('2d')!;
+    finalCtx.imageSmoothingEnabled = true;
+    finalCtx.imageSmoothingQuality = 'high';
+    finalCtx.drawImage(curCanvas, 0, 0, targetW, targetH);
+    return finalCanvas;
+  }
+
+  return curCanvas;
+}
+
+/**
+ * 1. Compress Image (Supports JPEG, WebP, PNG quantization, target KB auto-calculation, and memory-safe step-down)
  */
 export async function compressImage(
   file: File,
-  quality: number, // 0.01 - 1.0
-  format = 'image/jpeg'
+  quality: number, // 0.1 - 1.0
+  format = 'image/jpeg',
+  targetKb?: number
 ): Promise<ProcessingResult> {
   const safeImg = await loadSafeImage(file);
-  const canvas = document.createElement('canvas');
-  
-  // Smart scale for very low quality requests to achieve true file-size reduction
-  let scale = 1.0;
-  if (quality < 0.5 && (safeImg.width > 1600 || safeImg.height > 1600)) {
-    scale = 0.8;
+  const outFormat = format === 'auto' ? (file.type || 'image/jpeg') : format;
+
+  // Mode A: Target Size (KB) auto-calculation
+  if (typeof targetKb === 'number' && targetKb > 0) {
+    const targetBytes = targetKb * 1024;
+    let minQ = 0.08;
+    let maxQ = 0.98;
+    let bestBlob: Blob | null = null;
+    let bestCanvas: HTMLCanvasElement | null = null;
+
+    // Binary search quality iterations (pure in-memory HTML5 Canvas toBlob)
+    for (let iter = 0; iter < 5; iter++) {
+      const midQ = (minQ + maxQ) / 2;
+      const testCanvas = document.createElement('canvas');
+      testCanvas.width = safeImg.width;
+      testCanvas.height = safeImg.height;
+      const tCtx = testCanvas.getContext('2d')!;
+      if (outFormat === 'image/jpeg') {
+        tCtx.fillStyle = '#FFFFFF';
+        tCtx.fillRect(0, 0, testCanvas.width, testCanvas.height);
+      }
+      tCtx.drawImage(safeImg.source, 0, 0);
+
+      const blob = await new Promise<Blob | null>((res) => testCanvas.toBlob(res, outFormat, midQ));
+      if (!blob) break;
+
+      if (!bestBlob || Math.abs(blob.size - targetBytes) < Math.abs(bestBlob.size - targetBytes)) {
+        bestBlob = blob;
+        bestCanvas = testCanvas;
+      }
+
+      if (blob.size > targetBytes) {
+        maxQ = midQ;
+      } else {
+        minQ = midQ;
+      }
+    }
+
+    // If still exceeds targetKb at low quality, apply step-down scaling
+    if (bestBlob && bestBlob.size > targetBytes * 1.05 && (safeImg.width > 300 || safeImg.height > 300)) {
+      const ratio = Math.max(0.25, Math.sqrt(targetBytes / bestBlob.size));
+      const targetW = Math.max(80, Math.round(safeImg.width * ratio));
+      const targetH = Math.max(80, Math.round(safeImg.height * ratio));
+
+      const scaledCanvas = stepDownScaleCanvas(safeImg.source, safeImg.width, safeImg.height, targetW, targetH);
+      const scaledBlob = await new Promise<Blob | null>((res) => scaledCanvas.toBlob(res, outFormat, 0.72));
+      if (scaledBlob) {
+        bestBlob = scaledBlob;
+        bestCanvas = scaledCanvas;
+      }
+    }
+
+    if (bestBlob && bestCanvas) {
+      const ext = outFormat.replace('image/', '') === 'jpeg' ? 'jpg' : outFormat.replace('image/', '');
+      const originalBase = file.name.replace(/\.[^/.]+$/, '');
+      const outputFileName = `${originalBase}-compressed.${ext}`;
+      return {
+        url: URL.createObjectURL(bestBlob),
+        blob: bestBlob,
+        originalSize: file.size,
+        fileSize: bestBlob.size,
+        fileName: outputFileName,
+        width: bestCanvas.width,
+        height: bestCanvas.height,
+        mimeType: outFormat,
+      };
+    }
   }
-  
-  canvas.width = Math.max(1, Math.round(safeImg.width * scale));
-  canvas.height = Math.max(1, Math.round(safeImg.height * scale));
+
+  // Mode B: Interactive Quality Slider with Step-Down Resizing for high-res images
+  const clampedQuality = Math.min(1.0, Math.max(0.1, quality));
+  let targetW = safeImg.width;
+  let targetH = safeImg.height;
+
+  // Step-down scale high-resolution images (> 2000px) when lower quality is selected to prevent memory spikes
+  if (clampedQuality < 0.6 && (safeImg.width > 2000 || safeImg.height > 2000)) {
+    const scale = clampedQuality < 0.4 ? 0.75 : 0.85;
+    targetW = Math.max(1, Math.round(safeImg.width * scale));
+    targetH = Math.max(1, Math.round(safeImg.height * scale));
+  }
+
+  const canvas = stepDownScaleCanvas(safeImg.source, safeImg.width, safeImg.height, targetW, targetH);
   const ctx = canvas.getContext('2d')!;
 
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  if (format === 'image/jpeg') {
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (outFormat === 'image/jpeg') {
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = canvas.width;
+    bgCanvas.height = canvas.height;
+    const bgCtx = bgCanvas.getContext('2d')!;
+    bgCtx.fillStyle = '#FFFFFF';
+    bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    bgCtx.drawImage(canvas, 0, 0);
+    return canvasToProcessingResult(bgCanvas, file, outFormat, clampedQuality);
   }
-  ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
-  // For PNG, HTML5 Canvas toBlob ignores the quality parameter.
-  // We apply real color-quantization & palette dithering so PNG file sizes actually drop!
-  if (format === 'image/png' && quality < 0.98) {
+  // For PNG, apply real color quantization so file size drops
+  if (outFormat === 'image/png' && clampedQuality < 0.98) {
     try {
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const d = imgData.data;
-      // Step size increases as quality decreases (step 2 at 0.95 -> step 24 at 0.2)
-      const step = Math.max(2, Math.round((1 - quality) * 26));
+      const step = Math.max(2, Math.round((1 - clampedQuality) * 26));
       for (let i = 0; i < d.length; i += 4) {
-        d[i] = Math.round(d[i] / step) * step;         // R
-        d[i + 1] = Math.round(d[i + 1] / step) * step; // G
-        d[i + 2] = Math.round(d[i + 2] / step) * step; // B
+        d[i] = Math.round(d[i] / step) * step;
+        d[i + 1] = Math.round(d[i + 1] / step) * step;
+        d[i + 2] = Math.round(d[i + 2] / step) * step;
         if (d[i + 3] > 15) {
-          d[i + 3] = Math.round(d[i + 3] / step) * step; // A
+          d[i + 3] = Math.round(d[i + 3] / step) * step;
         }
       }
       ctx.putImageData(imgData, 0, 0);
     } catch {
-      // Fallback silently if canvas security restricts getImageData
+      // Fallback silently
     }
   }
 
-  return canvasToProcessingResult(canvas, file, format, quality);
+  return canvasToProcessingResult(canvas, file, outFormat, clampedQuality);
 }
 
 /**
@@ -241,6 +373,7 @@ export async function resizeImage(
     height: number;
     format?: string;
     quality?: number;
+    targetKb?: number;
   }
 ): Promise<ProcessingResult> {
   const safeImg = await loadSafeImage(file);
@@ -253,13 +386,63 @@ export async function resizeImage(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  const format = options.format || (file.type === 'image/png' ? 'image/png' : 'image/jpeg');
+  const format = options.format || 'image/jpeg';
   if (format === 'image/jpeg') {
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
   ctx.drawImage(safeImg.source, 0, 0, canvas.width, canvas.height);
 
+  // [RULE 1] Prevent File Size Inflation & Strictly Clamp to Target KB:
+  // - If Target Size (KB) is set and > original size, clamp to original size.
+  // - If Target Size (KB) is NOT set, ensure output size does not exceed original size.
+  const hasUserTargetKb = typeof options.targetKb === 'number' && options.targetKb > 0;
+  const userTargetBytes = hasUserTargetKb ? options.targetKb! * 1024 : file.size;
+  const effectiveCeilingBytes = hasUserTargetKb
+    ? Math.min(userTargetBytes, file.size)
+    : file.size;
+
+  if (format === 'image/jpeg' || format === 'image/webp') {
+    let low = 0.05;
+    let high = 0.95;
+    let bestResult: ProcessingResult | null = null;
+
+    // Fast check: if no target KB was entered, test with standard high quality first
+    if (!hasUserTargetKb) {
+      const defaultQuality = options.quality ?? 0.88;
+      const initialRes = await canvasToProcessingResult(canvas, file, format, defaultQuality);
+      if (initialRes.fileSize <= effectiveCeilingBytes) {
+        return initialRes;
+      }
+      // If standard quality inflates the file, binary search downwards to prevent inflation
+      high = defaultQuality;
+    }
+
+    // High-precision 10-iteration binary search to stay strictly <= effectiveCeilingBytes (within 5% margin)
+    for (let iter = 0; iter < 10; iter++) {
+      const q = (low + high) / 2;
+      const res = await canvasToProcessingResult(canvas, file, format, q);
+      if (res.fileSize <= effectiveCeilingBytes) {
+        bestResult = res;
+        // Stop early if within 5% of target ceiling
+        if (res.fileSize >= effectiveCeilingBytes * 0.95) {
+          break;
+        }
+        low = q; // Quality fits under ceiling, explore higher visual quality
+      } else {
+        high = q; // File exceeds ceiling, decrease quality
+      }
+    }
+
+    if (bestResult) {
+      return bestResult;
+    }
+
+    // Fallback: clamp to lowest viable quality limit (0.05)
+    return await canvasToProcessingResult(canvas, file, format, 0.05);
+  }
+
+  // PNG (lossless) format
   return canvasToProcessingResult(canvas, file, format, options.quality ?? 0.92);
 }
 
@@ -597,6 +780,405 @@ export async function convertFormat(
 }
 
 /**
+ * Standard 3.5 x 4.5 cm (413 x 531 px @ 300 DPI) Passport Dimensions & Tint Standards
+ */
+export const PASSPORT_STD = {
+  WIDTH_PX: 413,
+  HEIGHT_PX: 531,
+  ASPECT_RATIO: 413 / 531,
+  BG_WHITE: '#FFFFFF',
+  BG_LIGHT_BLUE: '#E0F2FE',
+} as const;
+
+export interface PassportCropOptions {
+  zoom?: number;
+  pan?: { x: number; y: number };
+  bgTint?: 'white' | 'light-blue' | string;
+  width?: number;
+  height?: number;
+  quality?: number;
+}
+
+/**
+ * Toggle between standard White and Light Blue passport background tints
+ */
+export function togglePassportBgTint(current: string): string {
+  return current === PASSPORT_STD.BG_LIGHT_BLUE
+    ? PASSPORT_STD.BG_WHITE
+    : PASSPORT_STD.BG_LIGHT_BLUE;
+}
+
+/**
+ * Modular Client-Side Canvas Passport Cropper
+ * - Locks aspect ratio strictly to 3.5 x 4.5 cm (413 x 531 px @ 300 DPI)
+ * - Supports zoom and pan (drag) for centering face
+ * - Supports White / Light Blue background tinting
+ * - Converts Canvas directly to Blob without heavy external libraries
+ */
+export async function cropPassportPhotoToBlob(
+  imageSource: HTMLImageElement | ImageBitmap | CanvasImageSource,
+  options: PassportCropOptions = {}
+): Promise<Blob> {
+  const {
+    zoom = 1,
+    pan = { x: 0, y: 0 },
+    bgTint = 'white',
+    width = PASSPORT_STD.WIDTH_PX,
+    height = PASSPORT_STD.HEIGHT_PX,
+    quality = 0.95,
+  } = options;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+  // 1. Fill background tint
+  const resolvedBg =
+    bgTint === 'light-blue'
+      ? PASSPORT_STD.BG_LIGHT_BLUE
+      : bgTint === 'white'
+      ? PASSPORT_STD.BG_WHITE
+      : bgTint;
+
+  ctx.fillStyle = resolvedBg;
+  ctx.fillRect(0, 0, width, height);
+
+  // 2. Base scaling: Close-up biometric passport framing (face covers 70-75% of vertical frame)
+  const imgW = (imageSource as any).width || (imageSource as any).naturalWidth || width;
+  const imgH = (imageSource as any).height || (imageSource as any).naturalHeight || height;
+
+  // Close-up zoom (1.48x): frames strictly collar/shoulders, cuts chest area out, face covers 70-75%
+  const baseScale = Math.max(width / imgW, height / imgH) * 1.48;
+  const effectiveScale = baseScale * Math.max(0.1, zoom);
+
+  const drawW = imgW * effectiveScale;
+  const drawH = imgH * effectiveScale;
+
+  // 3. Center alignment + 8%-10% head margin (hair top headroom, removes all chest)
+  const drawX = (width - drawW) / 2 + pan.x;
+  const drawY = (height - drawH) * 0.20 + pan.y;
+
+  ctx.drawImage(imageSource, drawX, drawY, drawW, drawH);
+
+  // Subtle 1px light gray cutting border (#d1d5db) for easy scissor cutting
+  ctx.save();
+  ctx.strokeStyle = '#d1d5db';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+  ctx.restore();
+
+  // 4. Convert directly to Blob
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('Canvas toBlob conversion failed'));
+      },
+      'image/jpeg',
+      quality
+    );
+  });
+}
+
+/**
+ * Subtle Biometric Head & Eye Alignment Guide
+ * - Rendered only on interactive preview canvas, NEVER in final exported photo.
+ */
+export function drawBiometricHeadGuide(
+  ctx: CanvasRenderingContext2D,
+  width: number = 413,
+  height: number = 531
+): void {
+  ctx.save();
+
+  const centerX = width / 2;
+  const centerY = height * 0.46;
+  const radiusX = width * 0.28;
+  const radiusY = height * 0.32;
+
+  // Semi-transparent dashed oval outline for face
+  ctx.beginPath();
+  ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 5]);
+  ctx.stroke();
+
+  // Subtle Eye-line indicator
+  const eyeY = height * 0.42;
+  ctx.beginPath();
+  ctx.moveTo(centerX - radiusX * 0.85, eyeY);
+  ctx.lineTo(centerX + radiusX * 0.85, eyeY);
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.45)';
+  ctx.setLineDash([3, 4]);
+  ctx.stroke();
+
+  // Chin alignment marker
+  const chinY = centerY + radiusY;
+  ctx.beginPath();
+  ctx.moveTo(centerX - 35, chinY);
+  ctx.lineTo(centerX + 35, chinY);
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.45)';
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+/**
+ * Universal Passport Canvas Renderer (Preview with guide OR clean export)
+ */
+export function renderPassportCanvas(
+  canvas: HTMLCanvasElement,
+  imageSource: HTMLImageElement | ImageBitmap | CanvasImageSource,
+  options: {
+    zoom?: number;
+    pan?: { x: number; y: number };
+    bgTint?: string;
+    showGuide?: boolean;
+  } = {}
+): void {
+  const { zoom = 1, pan = { x: 0, y: 0 }, bgTint = '#FFFFFF', showGuide = false } = options;
+
+  canvas.width = PASSPORT_STD.WIDTH_PX;
+  canvas.height = PASSPORT_STD.HEIGHT_PX;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // 1. Background Fill
+  ctx.fillStyle = bgTint;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 2. Centered Scaling with Auto-Frame Zoom & User Pan
+  const imgW = (imageSource as any).width || (imageSource as any).naturalWidth || canvas.width;
+  const imgH = (imageSource as any).height || (imageSource as any).naturalHeight || canvas.height;
+
+  // Close-up auto-frame zoom (1.48x): face occupies 70%-75% of height, frames collar/shoulders, cuts chest
+  const baseScale = Math.max(canvas.width / imgW, canvas.height / imgH) * 1.48;
+  const scale = baseScale * Math.max(0.1, zoom);
+
+  const drawW = imgW * scale;
+  const drawH = imgH * scale;
+  const drawX = (canvas.width - drawW) / 2 + pan.x;
+  const drawY = (canvas.height - drawH) * 0.20 + pan.y;
+
+  ctx.drawImage(imageSource, drawX, drawY, drawW, drawH);
+
+  // Subtle 1px light gray cutting border (#d1d5db) for easy scissor cutting
+  ctx.save();
+  ctx.strokeStyle = '#d1d5db';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+  ctx.restore();
+
+  // 3. Optional Overlay Guide (never shown in export)
+  if (showGuide) {
+    drawBiometricHeadGuide(ctx, canvas.width, canvas.height);
+  }
+}
+
+/**
+ * Direct Client-Side Download Trigger (High-Quality JPEG Blob, Zero Server, Zero External Libs)
+ */
+export async function downloadPassportPhoto(
+  imageSource: HTMLImageElement | ImageBitmap | CanvasImageSource,
+  options: PassportCropOptions = {},
+  filename = 'passport-photo-3.5x4.5cm.jpg'
+): Promise<void> {
+  const blob = await cropPassportPhotoToBlob(imageSource, options);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+export interface PrintableSheetOptions {
+  sheetSize?: '4x6' | 'a4';
+  copies?: number; // e.g. 6 or 8
+  spacingPx?: number; // 5mm to 8mm gap (default: 71px ≈ 6mm @ 300 DPI)
+  marginPx?: number;
+  showCutBorders?: boolean;
+}
+
+/**
+ * 1. Printable Sheet Generator:
+ * Arranges cropped passport photos on a 300 DPI sheet (4x6 inch: 1800x1200 or A4: 2480x3508)
+ * with consistent 6mm grid gap (5mm-8mm rule) and 1px #d1d5db scissor cut borders.
+ */
+export function generatePrintableSheetCanvas(
+  passportCanvas: HTMLCanvasElement | CanvasImageSource,
+  options: PrintableSheetOptions = {}
+): HTMLCanvasElement {
+  const {
+    sheetSize = '4x6',
+    copies,
+    spacingPx = 71, // 6mm gap at 300 DPI (standard 5mm to 8mm rule)
+    marginPx = 60,
+    showCutBorders = true,
+  } = options;
+
+  const isA4 = sheetSize === 'a4';
+  const sheetW = isA4 ? 2480 : 1800;
+  const sheetH = isA4 ? 3508 : 1200;
+
+  const photoW = (passportCanvas as any).width || PASSPORT_STD.WIDTH_PX;
+  const photoH = (passportCanvas as any).height || PASSPORT_STD.HEIGHT_PX;
+
+  const sheetCanvas = document.createElement('canvas');
+  sheetCanvas.width = sheetW;
+  sheetCanvas.height = sheetH;
+  const ctx = sheetCanvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas context unavailable');
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, sheetW, sheetH);
+
+  const maxCols = Math.max(1, Math.floor((sheetW - marginPx * 2 + spacingPx) / (photoW + spacingPx)));
+  const maxRows = Math.max(1, Math.floor((sheetH - marginPx * 2 + spacingPx) / (photoH + spacingPx)));
+  const totalCapacity = maxCols * maxRows;
+
+  const totalCopies = copies ? Math.min(copies, totalCapacity) : totalCapacity;
+  const cols = Math.min(maxCols, totalCopies);
+  const rows = Math.ceil(totalCopies / cols);
+
+  const gridW = cols * photoW + (cols - 1) * spacingPx;
+  const gridH = rows * photoH + (rows - 1) * spacingPx;
+  const startX = Math.round((sheetW - gridW) / 2);
+  const startY = Math.round((sheetH - gridH) / 2);
+
+  let placed = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (placed >= totalCopies) break;
+
+      const px = startX + c * (photoW + spacingPx);
+      const py = startY + r * (photoH + spacingPx);
+
+      ctx.drawImage(passportCanvas, px, py, photoW, photoH);
+
+      // Subtle 1px cutting border (#d1d5db) around every photo
+      if (showCutBorders) {
+        ctx.save();
+        ctx.strokeStyle = '#d1d5db';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(px + 0.5, py + 0.5, photoW - 1, photoH - 1);
+        ctx.restore();
+      }
+
+      placed++;
+    }
+  }
+
+  return sheetCanvas;
+}
+
+/**
+ * 2. Direct Print Trigger via lightweight hidden iframe (No UI disruption)
+ */
+export function printPassportSheet(sheetCanvas: HTMLCanvasElement): void {
+  sheetCanvas.toBlob(
+    (blob) => {
+      if (!blob) return;
+      const blobUrl = URL.createObjectURL(blob);
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+
+      iframe.src = blobUrl;
+      iframe.onload = () => {
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch (e) {
+          console.error('Print trigger error', e);
+        }
+        setTimeout(() => {
+          if (document.body.contains(iframe)) {
+            document.body.removeChild(iframe);
+          }
+          URL.revokeObjectURL(blobUrl);
+        }, 60000);
+      };
+    },
+    'image/jpeg',
+    0.98
+  );
+}
+
+/**
+ * 3. Direct High-Res JPEG or PDF Download
+ */
+export async function downloadPassportSheet(
+  sheetCanvas: HTMLCanvasElement,
+  filename = 'passport-sheet-300dpi',
+  format: 'jpeg' | 'pdf' = 'jpeg'
+): Promise<void> {
+  if (format === 'jpeg') {
+    sheetCanvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${filename}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      },
+      'image/jpeg',
+      0.98
+    );
+    return;
+  }
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdfDoc = await PDFDocument.create();
+
+  const jpegBlob = await new Promise<Blob | null>((resolve) =>
+    sheetCanvas.toBlob(resolve, 'image/jpeg', 0.96)
+  );
+  if (!jpegBlob) throw new Error('Failed to encode sheet image');
+
+  const arrayBuffer = await jpegBlob.arrayBuffer();
+  const pdfImage = await pdfDoc.embedJpg(arrayBuffer);
+
+  const ptW = sheetCanvas.width * (72 / 300);
+  const ptH = sheetCanvas.height * (72 / 300);
+
+  const page = pdfDoc.addPage([ptW, ptH]);
+  page.drawImage(pdfImage, {
+    x: 0,
+    y: 0,
+    width: ptW,
+    height: ptH,
+  });
+
+  const pdfBytes = await pdfDoc.save();
+  const pdfBlob = new Blob([pdfBytes.buffer as ArrayBuffer], { type: 'application/pdf' });
+  const pdfUrl = URL.createObjectURL(pdfBlob);
+
+  const a = document.createElement('a');
+  a.href = pdfUrl;
+  a.download = `${filename}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(pdfUrl), 2000);
+}
+
+/**
  * 12. Passport Photo Maker
  */
 export async function generatePassportPhoto(
@@ -624,7 +1206,7 @@ export async function generatePassportPhoto(
   cutCtx.fillStyle = options.bgColor;
   cutCtx.fillRect(0, 0, photoW, photoH);
 
-  // Center fit image with slight top bias for head alignment
+  // Auto-frame zoom: face covers 70%-80% of vertical height with collarbone framing
   const imgRatio = safeImg.width / safeImg.height;
   const targetRatio = photoW / photoH;
   let sw = safeImg.width;
@@ -632,15 +1214,28 @@ export async function generatePassportPhoto(
   let sx = 0;
   let sy = 0;
 
+  // Close-up auto-frame: face occupies 70%-75% of height, cuts at collar/shoulders, leaves 8%-10% headroom
+  const cropFactor = 0.676; // 1 / 1.48
   if (imgRatio > targetRatio) {
-    sw = safeImg.height * targetRatio;
+    sw = safeImg.height * targetRatio * cropFactor;
+    sh = safeImg.height * cropFactor;
     sx = (safeImg.width - sw) / 2;
+    sy = (safeImg.height - sh) * 0.18;
   } else {
-    sh = safeImg.width / targetRatio;
-    sy = Math.max(0, (safeImg.height - sh) * 0.2); // top bias
+    sw = safeImg.width * cropFactor;
+    sh = (safeImg.width / targetRatio) * cropFactor;
+    sx = (safeImg.width - sw) / 2;
+    sy = Math.max(0, (safeImg.height - sh) * 0.18);
   }
 
   cutCtx.drawImage(safeImg.source, sx, sy, sw, sh, 0, 0, photoW, photoH);
+
+  // Subtle 1px light gray cutting border (#d1d5db)
+  cutCtx.save();
+  cutCtx.strokeStyle = '#d1d5db';
+  cutCtx.lineWidth = 1;
+  cutCtx.strokeRect(0.5, 0.5, photoW - 1, photoH - 1);
+  cutCtx.restore();
 
   if (options.sheetType === 'single') {
     return canvasToProcessingResult(cutCanvas, file, 'image/jpeg', 0.98, 'passport_photo_pixora.jpg');
@@ -660,24 +1255,26 @@ export async function generatePassportPhoto(
   sheetCtx.fillStyle = '#FFFFFF';
   sheetCtx.fillRect(0, 0, sheetW, sheetH);
 
-  // Calculate grid layout
-  const cols = Math.floor((sheetW - 40) / (photoW + 30));
-  const rows = Math.floor((sheetH - 40) / (photoH + 30));
-  const count = cols * rows;
+  // Consistent 6mm gap between photos (standard 5mm to 8mm rule @ 300 DPI)
+  const spacingPx = 71;
+  const cols = Math.floor((sheetW - 60) / (photoW + spacingPx));
+  const rows = Math.floor((sheetH - 60) / (photoH + spacingPx));
 
-  const startX = (sheetW - (cols * photoW + (cols - 1) * 30)) / 2;
-  const startY = (sheetH - (rows * photoH + (rows - 1) * 30)) / 2;
+  const startX = (sheetW - (cols * photoW + (cols - 1) * spacingPx)) / 2;
+  const startY = (sheetH - (rows * photoH + (rows - 1) * spacingPx)) / 2;
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const px = startX + c * (photoW + 30);
-      const py = startY + r * (photoH + 30);
+      const px = startX + c * (photoW + spacingPx);
+      const py = startY + r * (photoH + spacingPx);
       sheetCtx.drawImage(cutCanvas, px, py);
 
-      // Delicate cut line border
-      sheetCtx.strokeStyle = '#E2E8F0';
+      // Subtle 1px light gray cutting border (#d1d5db)
+      sheetCtx.save();
+      sheetCtx.strokeStyle = '#d1d5db';
       sheetCtx.lineWidth = 1;
-      sheetCtx.strokeRect(px, py, photoW, photoH);
+      sheetCtx.strokeRect(px + 0.5, py + 0.5, photoW - 1, photoH - 1);
+      sheetCtx.restore();
     }
   }
 

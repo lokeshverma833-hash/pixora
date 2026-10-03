@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FileSearch, Copy, Download, Sparkles, Check, RefreshCw, Languages, FileText, AlertCircle } from 'lucide-react';
 import { createWorker } from 'tesseract.js';
 import { Dropzone } from '../common/Dropzone';
+import { resolveApiUrl } from '../../services/aiService';
 
 export const OcrToolView: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -41,7 +42,7 @@ export const OcrToolView: React.FC = () => {
         reader.onload = async () => {
           const base64 = reader.result as string;
           try {
-            const resp = await fetch('/api/ai/ocr', {
+            const resp = await fetch(resolveApiUrl('/api/ai/ocr'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({

@@ -108,7 +108,7 @@ export const PWAInstallModal: React.FC<PWAInstallModalProps> = ({ isOpen, onClos
         {/* Direct Link Section */}
         <div className="space-y-2 mb-6">
           <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
-            Direct Mobile App URL (फोन में खोलने का लिंक):
+            Direct Web App URL
           </label>
           <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-800/80">
             <input
@@ -162,25 +162,25 @@ export const PWAInstallModal: React.FC<PWAInstallModalProps> = ({ isOpen, onClos
         <div className="space-y-4 text-xs">
           <div className="border-t border-slate-100 dark:border-slate-800 pt-4">
             <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-1.5">
-              <span>Android (Google Chrome) पर कैसे इनस्टॉल करें:</span>
+              <span>How to install on Android (Chrome):</span>
             </h4>
             <ol className="list-decimal list-inside space-y-1.5 text-slate-600 dark:text-slate-300 leading-relaxed pl-1 text-[11px]">
-              <li>अपने फोन के <strong>Chrome Browser</strong> में ऊपर दिया गया लिंक खोलें।</li>
-              <li>ऊपर दाईं तरफ <strong>तीन डॉट्स (⋮)</strong> मेनू पर टैप करें।</li>
-              <li><strong>&quot;Install app&quot;</strong> या <strong>&quot;Add to Home screen&quot;</strong> पर क्लिक करें।</li>
-              <li>Pixora का आइकॉन आपके मोबाइल होम स्क्रीन पर ऐप की तरह जुड़ जाएगा!</li>
+              <li>Open the link above in <strong>Google Chrome</strong>.</li>
+              <li>Tap the <strong>three dots (⋮)</strong> menu in the top right corner.</li>
+              <li>Tap <strong>&quot;Install app&quot;</strong> or <strong>&quot;Add to Home screen&quot;</strong>.</li>
+              <li>Pixora will be installed on your mobile home screen!</li>
             </ol>
           </div>
 
           <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
             <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-1.5">
-              <span>iPhone / iPad (Safari) पर कैसे इनस्टॉल करें:</span>
+              <span>How to install on iPhone / iPad (Safari):</span>
             </h4>
             <ol className="list-decimal list-inside space-y-1.5 text-slate-600 dark:text-slate-300 leading-relaxed pl-1 text-[11px]">
-              <li>अपने iPhone के <strong>Safari</strong> ब्राउज़र में यह लिंक खोलें।</li>
-              <li>नीचे बीच में दिए गए <strong>Share बटन (चौकोर बॉक्स में ऊपर की तरफ तीर)</strong> पर टैप करें।</li>
-              <li>नीचे स्क्रॉल करें और <strong>&quot;Add to Home Screen&quot; (+)</strong> चुनें।</li>
-              <li>ऊपर दाईं तरफ <strong>&quot;Add&quot;</strong> दबाएं। Pixora आपके iPhone पर ऐप बन जाएगा!</li>
+              <li>Open this link in Apple <strong>Safari</strong> on your iOS device.</li>
+              <li>Tap the <strong>Share button (square with upward arrow)</strong> at the bottom.</li>
+              <li>Scroll down and choose <strong>&quot;Add to Home Screen&quot; (+)</strong>.</li>
+              <li>Tap <strong>&quot;Add&quot;</strong> in the top right corner. Pixora will now run as a full-screen app!</li>
             </ol>
           </div>
         </div>

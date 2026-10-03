@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, RefreshCw, CheckCircle, Sliders, Printer, Shield } from 'lucide-react';
+import { Download, RefreshCw, CheckCircle, Sliders, Printer, Shield, FileText } from 'lucide-react';
 import { Dropzone } from '../common/Dropzone';
 import { InlineAlert } from '../common/InlineAlert';
-import { generatePassportPhoto, formatBytes } from '../../utils/imageProcessors';
+import { generatePassportPhoto, formatBytes, PassportUtility } from '../../utils/imageProcessors';
 import { ProcessingResult } from '../../types';
 
 const PRESETS = [
@@ -23,6 +23,7 @@ export const PassportPhotoView: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   const originalUrlRef = useRef<string | null>(null);
   const resultRef = useRef<ProcessingResult | null>(null);
@@ -84,6 +85,24 @@ export const PassportPhotoView: React.FC = () => {
       setErrorMessage(err?.message || 'Failed to generate passport photo. Please try a different image.');
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleDownloadPDF = async () => {
+    if (!result) return;
+    setIsExportingPdf(true);
+    try {
+      const is4x6 = sheetType === 'sheet4x6';
+      await PassportUtility.exportPrintReadyPDF(result.url, {
+        fileName: `passport_${sheetType}_print.pdf`,
+        format: is4x6 ? '4x6' : 'a4',
+        orientation: is4x6 ? 'landscape' : 'portrait',
+      });
+    } catch (err: any) {
+      console.error('PDF export error:', err);
+      setErrorMessage(err?.message || 'Failed to generate print-ready PDF.');
+    } finally {
+      setIsExportingPdf(false);
     }
   };
 
@@ -292,14 +311,34 @@ export const PassportPhotoView: React.FC = () => {
                     </span>
                   </div>
 
-                  <a
-                    href={result.url}
-                    download={result.fileName}
-                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-sm hover:bg-emerald-500 transition-colors"
-                  >
-                    <Download className="h-4 w-4" />
-                    Download Ready-to-Print
-                  </a>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={result.url}
+                      download={result.fileName}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-800 shadow-2xs hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700 transition-colors"
+                    >
+                      <Download className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+                      Download JPG
+                    </a>
+
+                    <button
+                      onClick={handleDownloadPDF}
+                      disabled={isExportingPdf}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                    >
+                      {isExportingPdf ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          <span>Generating PDF...</span>
+                        </>
+                      ) : (
+                        <>
+                          <FileText className="h-4 w-4" />
+                          <span>Download Print-Ready PDF</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

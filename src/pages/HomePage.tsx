@@ -97,7 +97,7 @@ export const HomePage: React.FC<HomePageProps> = ({
           </h1>
 
           <p className="mx-auto max-w-2xl text-base sm:text-lg text-slate-600 dark:text-slate-300 leading-relaxed text-balance">
-            Compress, resize, crop, and convert images, merge or split PDFs, and enhance photos in seconds. Processed directly in your browser memory for total privacy.
+            Fast, private image &amp; PDF processing directly in your browser. No server uploads, zero quality loss.
           </p>
 
           {/* Modern Interactive Search Bar with Live Suggestions */}
@@ -105,13 +105,11 @@ export const HomePage: React.FC<HomePageProps> = ({
 
           {/* Unboxed Trust Points */}
           <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-xs text-slate-500 dark:text-slate-400">
-            <span>Zero Server Uploads</span>
-            <span aria-hidden="true">·</span>
+            <span>100% Client-Side Privacy</span>
+            <span aria-hidden="true">•</span>
             <span>No Watermarks</span>
-            <span aria-hidden="true">·</span>
-            <span>100% Free Forever</span>
-            <span aria-hidden="true">·</span>
-            <span>Instant In-Memory Execution</span>
+            <span aria-hidden="true">•</span>
+            <span>Instant &amp; Free</span>
           </div>
 
           {/* Recently Used Tools Bar (Unboxed clean text) */}

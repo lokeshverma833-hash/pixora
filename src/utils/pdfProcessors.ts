@@ -1,6 +1,7 @@
 import { PDFDocument, rgb, degrees, StandardFonts } from 'pdf-lib';
 import { ProcessingResult } from '../types';
 import { renderPdfToImages } from './pdfRenderer';
+import { createZipBlob } from './zipUtils';
 
 /**
  * Read total page count from a PDF file
@@ -28,7 +29,7 @@ export async function mergePdf(files: File[]): Promise<ProcessingResult> {
     copiedPages.forEach((page) => mergedPdf.addPage(page));
   }
 
-  const pdfBytes = await mergedPdf.save();
+  const pdfBytes = await mergedPdf.save({ useObjectStreams: false });
   const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
   const totalOriginalSize = files.reduce((acc, f) => acc + f.size, 0);
@@ -36,7 +37,7 @@ export async function mergePdf(files: File[]): Promise<ProcessingResult> {
   return {
     blob,
     url,
-    fileName: 'merged_pixora.pdf',
+    fileName: 'pixora-merged.pdf',
     fileSize: blob.size,
     originalSize: totalOriginalSize,
     mimeType: 'application/pdf',
@@ -44,25 +45,83 @@ export async function mergePdf(files: File[]): Promise<ProcessingResult> {
 }
 
 /**
- * Parse page range string like "1-3, 5, 8-10" into 0-indexed array of indices
+ * Sanitize a PDF filename by removing special characters, duplicate brackets,
+ * collapsing spaces, and appending a clean suffix (e.g. {cleanName}_extracted.pdf).
  */
-function parsePageRanges(rangeStr: string, totalPages: number): number[] {
+export function sanitizePdfFileName(rawName: string, suffix = '_extracted'): string {
+  const base = rawName.replace(/\.pdf$/i, '');
+  // Remove brackets, parentheses, braces, special characters, and collapse duplicate underscores/spaces
+  const cleaned = base
+    .replace(/[()[\]{}<>:"/\\|?*#%!@+=~`^$&]/g, ' ')
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  const safeBase = cleaned.length > 0 ? cleaned : 'document';
+  return `${safeBase}${suffix}.pdf`;
+}
+
+/**
+ * Live validation helper for range inputs against total page count.
+ */
+export function validatePageRange(rangeStr: string, totalPages: number): { isValid: boolean; error: string | null } {
+  const trimmed = rangeStr.trim();
+  if (!trimmed) {
+    return { isValid: false, error: 'Please enter page range to extract.' };
+  }
+
+  const parts = trimmed.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    return { isValid: false, error: 'Please enter page range to extract.' };
+  }
+
+  for (const part of parts) {
+    if (part.includes('-')) {
+      const sides = part.split('-');
+      if (sides.length !== 2) {
+        return { isValid: false, error: `Invalid page range (Document only has ${totalPages} pages)` };
+      }
+      const start = parseInt(sides[0].trim(), 10);
+      const end = parseInt(sides[1].trim(), 10);
+      if (isNaN(start) || isNaN(end) || start < 1 || start > totalPages || end < 1 || end > totalPages || start > end) {
+        return { isValid: false, error: `Invalid page range (Document only has ${totalPages} pages)` };
+      }
+    } else {
+      const p = parseInt(part, 10);
+      if (isNaN(p) || p < 1 || p > totalPages) {
+        return { isValid: false, error: `Invalid page range (Document only has ${totalPages} pages)` };
+      }
+    }
+  }
+
+  return { isValid: true, error: null };
+}
+
+/**
+ * Parse page range string like "1-3, 5, 8-10" into 0-indexed array of indices
+ * Validates range boundaries against totalPages and throws polite errors if invalid.
+ */
+export function parsePageRanges(rangeStr: string, totalPages: number): number[] {
+  const validation = validatePageRange(rangeStr, totalPages);
+  if (!validation.isValid) {
+    throw new Error(validation.error || `Invalid page range (Document only has ${totalPages} pages)`);
+  }
+
   const indices = new Set<number>();
   const parts = rangeStr.split(',').map((p) => p.trim()).filter(Boolean);
 
   for (const part of parts) {
     if (part.includes('-')) {
       const [startStr, endStr] = part.split('-');
-      const start = Math.max(1, parseInt(startStr, 10));
-      const end = Math.min(totalPages, parseInt(endStr, 10));
+      const start = parseInt(startStr, 10);
+      const end = parseInt(endStr, 10);
       for (let i = start; i <= end; i++) {
         indices.add(i - 1);
       }
     } else {
       const p = parseInt(part, 10);
-      if (!isNaN(p) && p >= 1 && p <= totalPages) {
-        indices.add(p - 1);
-      }
+      indices.add(p - 1);
     }
   }
 
@@ -70,7 +129,7 @@ function parsePageRanges(rangeStr: string, totalPages: number): number[] {
 }
 
 /**
- * 2. Split PDF
+ * 2. Split PDF (Extract specific page range)
  */
 export async function splitPdf(file: File, pageRangeStr: string): Promise<ProcessingResult> {
   const arrayBuffer = await file.arrayBuffer();
@@ -78,25 +137,57 @@ export async function splitPdf(file: File, pageRangeStr: string): Promise<Proces
   const totalPages = sourcePdf.getPageCount();
 
   const selectedIndices = parsePageRanges(pageRangeStr, totalPages);
-  if (selectedIndices.length === 0) {
-    throw new Error(`Invalid page range. Please choose between 1 and ${totalPages}.`);
-  }
 
   const newPdf = await PDFDocument.create();
   const copiedPages = await newPdf.copyPages(sourcePdf, selectedIndices);
   copiedPages.forEach((page) => newPdf.addPage(page));
 
-  const pdfBytes = await newPdf.save();
+  const pdfBytes = await newPdf.save({ useObjectStreams: false });
   const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
+  const cleanFileName = sanitizePdfFileName(file.name, '_extracted');
 
   return {
     blob,
     url,
-    fileName: `${file.name.replace(/\.[^/.]+$/, '')}_split.pdf`,
+    fileName: cleanFileName,
     fileSize: blob.size,
     originalSize: file.size,
     mimeType: 'application/pdf',
+  };
+}
+
+/**
+ * Split all pages into individual PDFs and package into a ZIP archive
+ */
+export async function splitAllPdfPages(file: File): Promise<ProcessingResult> {
+  const arrayBuffer = await file.arrayBuffer();
+  const sourcePdf = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+  const totalPages = sourcePdf.getPageCount();
+
+  const zipInputs: { name: string; data: Uint8Array }[] = [];
+
+  for (let i = 0; i < totalPages; i++) {
+    const singlePdf = await PDFDocument.create();
+    const [copiedPage] = await singlePdf.copyPages(sourcePdf, [i]);
+    singlePdf.addPage(copiedPage);
+    const pdfBytes = await singlePdf.save({ useObjectStreams: false });
+    zipInputs.push({
+      name: `page_${i + 1}.pdf`,
+      data: pdfBytes,
+    });
+  }
+
+  const zipBlob = await createZipBlob(zipInputs);
+  const url = URL.createObjectURL(zipBlob);
+
+  return {
+    blob: zipBlob,
+    url,
+    fileName: 'pixora-split-pages.zip',
+    fileSize: zipBlob.size,
+    originalSize: file.size,
+    mimeType: 'application/zip',
   };
 }
 

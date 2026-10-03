@@ -69,7 +69,7 @@ export const DownloadPage: React.FC = () => {
             {/* Direct App Link Box */}
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block">
-                Mobile App Link (फोन में खोलने का लिंक):
+                Direct Web App URL
               </label>
               <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-800/80">
                 <input
@@ -197,10 +197,10 @@ export const DownloadPage: React.FC = () => {
             </div>
           </div>
           <ol className="list-decimal list-inside space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed pl-1">
-            <li>अपने फोन के <strong>Chrome Browser</strong> में ऊपर दिया गया लिंक खोलें।</li>
-            <li>ऊपर दाईं तरफ दिए गए <strong>तीन डॉट्स (⋮)</strong> मेनू पर टैप करें।</li>
-            <li><strong>&quot;Install app&quot;</strong> या <strong>&quot;Add to Home screen&quot;</strong> चुनें।</li>
-            <li>पुष्टि करने के लिए <strong>&quot;Install&quot;</strong> दबाएं। Pixora आपके होम स्क्रीन पर ऐप आइकॉन के रूप में सेव हो जाएगा!</li>
+            <li>Open the URL above in <strong>Google Chrome</strong> or <strong>Samsung Internet</strong>.</li>
+            <li>Tap the <strong>three dots menu (⋮)</strong> in the top right corner.</li>
+            <li>Select <strong>&quot;Install app&quot;</strong> or <strong>&quot;Add to Home screen&quot;</strong>.</li>
+            <li>Tap <strong>&quot;Install&quot;</strong> to confirm. Pixora will be added to your home screen!</li>
           </ol>
         </div>
 
@@ -218,10 +218,10 @@ export const DownloadPage: React.FC = () => {
             </div>
           </div>
           <ol className="list-decimal list-inside space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed pl-1">
-            <li>अपने iPhone के <strong>Safari</strong> ब्राउज़र में यह लिंक खोलें।</li>
-            <li>स्क्रीन के नीचे बीच में दिए गए <strong>Share बटन (चौकोर बॉक्स में ऊपर की तरफ तीर)</strong> पर टैप करें।</li>
-            <li>नीचे स्क्रॉल करें और <strong>&quot;Add to Home Screen&quot; (+)</strong> पर क्लिक करें।</li>
-            <li>ऊपर दाईं तरफ <strong>&quot;Add&quot;</strong> दबाएं। Pixora आपके iPhone पर फुल-स्क्रीन ऐप की तरह काम करेगा!</li>
+            <li>Open this link in Apple <strong>Safari</strong> on your iPhone or iPad.</li>
+            <li>Tap the <strong>Share button (square with an upward arrow)</strong> in the toolbar.</li>
+            <li>Scroll down and select <strong>&quot;Add to Home Screen&quot; (+)</strong>.</li>
+            <li>Tap <strong>&quot;Add&quot;</strong> in the top right. Pixora will launch as a full-screen app!</li>
           </ol>
         </div>
       </div>

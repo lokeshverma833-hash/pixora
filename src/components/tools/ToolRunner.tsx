@@ -143,9 +143,9 @@ export const ToolRunner: React.FC<ToolRunnerProps> = ({ tool, onSelectTool, onNa
           {tool.howToSteps.map((s) => (
             <div
               key={s.step}
-              className="relative rounded-2xl bg-slate-50/80 p-6 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800"
+              className="relative rounded-2xl bg-slate-50/80 p-6 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800 hover:border-indigo-300/80 dark:hover:border-indigo-700/60 transition-colors"
             >
-              <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400 block mb-2">
+              <span className="inline-block text-sm font-mono font-extrabold tracking-wider bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 bg-clip-text text-transparent dark:from-indigo-400 dark:via-indigo-300 dark:to-violet-400 mb-2.5">
                 0{s.step}.
               </span>
               <h3 className="font-bold text-slate-900 dark:text-white text-base mb-1.5">
@@ -225,7 +225,7 @@ export const ToolRunner: React.FC<ToolRunnerProps> = ({ tool, onSelectTool, onNa
               <button
                 key={t.id}
                 onClick={() => onSelectTool(t)}
-                className="group flex flex-col justify-between rounded-2xl border border-slate-200/80 bg-white p-5 text-left shadow-2xs hover:border-indigo-400/90 hover:shadow-xs hover:-translate-y-0.5 dark:border-slate-800 dark:bg-slate-900 transition-all duration-150"
+                className="group flex flex-col justify-between rounded-2xl border border-slate-200/80 bg-white p-5 text-left shadow-2xs hover:border-indigo-400/90 hover:shadow-md hover:-translate-y-1 active:translate-y-0 active:scale-[0.99] dark:border-slate-800 dark:bg-slate-900 dark:hover:border-indigo-500/50 transition-all duration-200 ease-out"
               >
                 <div>
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-50 text-slate-700 group-hover:bg-indigo-600 group-hover:text-white dark:bg-slate-800 dark:text-slate-300 transition-colors mb-3 border border-slate-200/60 dark:border-slate-700/60 shadow-2xs">

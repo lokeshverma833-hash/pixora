@@ -61,21 +61,21 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-16 sm:pt-24 bg-slate-950/60 backdrop-blur-sm animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-start justify-center p-3 sm:p-4 pt-12 sm:pt-20 bg-slate-950/60 backdrop-blur-sm animate-in fade-in duration-200"
     >
       <div
-        className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl border border-slate-200 dark:bg-slate-900 dark:border-slate-800"
+        className="w-full max-w-2xl max-h-[85dvh] flex flex-col overflow-hidden rounded-2xl bg-white shadow-2xl border border-slate-200 dark:bg-slate-900 dark:border-slate-800"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search Input Bar */}
-        <div className="relative flex items-center border-b border-slate-200 px-4 py-3.5 dark:border-slate-800">
+        <div className="relative flex items-center border-b border-slate-200 px-4 py-3.5 dark:border-slate-800 shrink-0">
           <Search className="h-5 w-5 text-slate-400 shrink-0 mr-3" />
           <input
             ref={inputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search 35+ image & PDF tools (e.g., compress, crop, merge, ocr)..."
+            placeholder="Search 35+ tools (e.g. compress, resize, pdf)..."
             className="w-full bg-transparent text-base text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-white"
           />
           {query && (
@@ -86,16 +86,25 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
               <X className="h-4 w-4" />
             </button>
           )}
+          {/* Desktop ESC badge: hidden on mobile (< 768px) */}
           <button
             onClick={onClose}
-            className="ml-2 rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400"
+            className="ml-2 hidden md:inline-flex items-center rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400"
           >
             ESC
+          </button>
+          {/* Mobile close button: visible only on mobile screens (< 768px) */}
+          <button
+            onClick={onClose}
+            aria-label="Close search"
+            className="ml-2 p-1 rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 md:hidden"
+          >
+            <X className="h-5 w-5" />
           </button>
         </div>
 
         {/* Category Filters */}
-        <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-100 p-2 text-xs dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50">
+        <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-100 p-2 text-xs dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50 shrink-0">
           <button
             onClick={() => setSelectedCategory('all')}
             className={`rounded-lg px-3 py-1.5 font-medium transition-colors ${
@@ -121,8 +130,8 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
           ))}
         </div>
 
-        {/* Tools Results List */}
-        <div className="max-h-[60vh] overflow-y-auto p-2">
+        {/* Tools Results List with Smooth Touch-Scrolling & Keyboard Safe Layout */}
+        <div className="flex-1 overflow-y-auto overscroll-contain p-2 [-webkit-overflow-scrolling:touch]">
           {filteredTools.length === 0 ? (
             <div className="p-8 text-center text-slate-500 dark:text-slate-400">
               <p className="text-sm font-semibold">No tools found matching &quot;{query}&quot;</p>

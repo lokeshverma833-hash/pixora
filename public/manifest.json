@@ -1,22 +1,16 @@
 {
   "id": "/",
-  "name": "Pixora Tools - Image & PDF Editor",
+  "name": "Pixora - Image & PDF Tools",
   "short_name": "Pixora",
-  "description": "Fast, private, in-browser Image & PDF tools and AI utilities. Compress, convert, edit, and enhance photos on your device.",
+  "description": "Fast, private image & PDF processing directly in your browser. No server uploads, zero quality loss.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#0F172A",
-  "theme_color": "#4F46E5",
+  "background_color": "#0b0f19",
+  "theme_color": "#0b0f19",
   "categories": ["utilities", "productivity", "photo"],
   "icons": [
-    {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
-    },
     {
       "src": "/icon-192.png",
       "sizes": "192x192",

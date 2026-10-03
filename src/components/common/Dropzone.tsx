@@ -8,6 +8,7 @@ interface DropzoneProps {
   maxSizeMB?: number;
   title?: string;
   subtitle?: string;
+  formatsText?: string;
   className?: string;
   isProcessing?: boolean;
   progress?: number;
@@ -21,6 +22,7 @@ export const Dropzone: React.FC<DropzoneProps> = ({
   maxSizeMB = 50,
   title = 'Drop your files here',
   subtitle = 'or click to browse from your device',
+  formatsText,
   className = '',
   isProcessing = false,
   progress = 0,
@@ -147,9 +149,12 @@ export const Dropzone: React.FC<DropzoneProps> = ({
 
           {/* Unboxed Metadata Discipline */}
           <div className="flex flex-wrap items-center justify-center gap-2 pt-2 text-xs text-slate-500 dark:text-slate-400 font-medium">
-            <span>Up to {maxSizeMB}MB</span>
-            <span aria-hidden="true">·</span>
-            <span>JPG, PNG, WebP, PDF</span>
+            <span>
+              {formatsText ||
+                (accept?.includes('application/pdf') || accept?.includes('.pdf')
+                  ? `Supports PDF, JPG, PNG (Up to ${maxSizeMB}MB)`
+                  : `Supports JPG, PNG, WebP, AVIF (Up to ${maxSizeMB}MB)`)}
+            </span>
             <span aria-hidden="true">·</span>
             <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold">
               <ShieldCheck className="h-3.5 w-3.5" />

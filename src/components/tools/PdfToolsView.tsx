@@ -26,6 +26,8 @@ import { Dropzone } from '../common/Dropzone';
 import {
   mergePdf,
   splitPdf,
+  splitAllPdfPages,
+  validatePageRange,
   compressPdf,
   extractPdfPages,
   rotatePdf,
@@ -44,11 +46,13 @@ interface PdfToolsViewProps {
 
 export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
   const [files, setFiles] = useState<File[]>([]);
+  const [filePageCounts, setFilePageCounts] = useState<{ [fileName: string]: number }>({});
   const [pageCount, setPageCount] = useState<number>(1);
   const [pagePreviews, setPagePreviews] = useState<RenderedPdfPage[]>([]);
   const [isLoadingPreviews, setIsLoadingPreviews] = useState(false);
   const [selectedPages, setSelectedPages] = useState<number[]>([]);
   const [pageRangeStr, setPageRangeStr] = useState<string>('1-2');
+  const [splitMode, setSplitMode] = useState<'range' | 'all'>('range');
 
   // Rotate tool state
   const [rotateAngle, setRotateAngle] = useState<number>(90);
@@ -81,6 +85,13 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
 
   const isJpgToPdf = tool.id === 'jpg-to-pdf';
   const isMerge = tool.id === 'merge-pdf';
+  const isSplit = tool.id === 'split-pdf';
+
+  // Live validation for Split PDF custom range
+  const rangeValidation =
+    isSplit && splitMode === 'range' && pageCount > 0
+      ? validatePageRange(pageRangeStr, pageCount)
+      : { isValid: true, error: null };
 
   // Helper to safely revoke all URLs in a PDF ProcessingResult
   const revokePdfResultUrls = (r: ProcessingResult | null) => {
@@ -140,6 +151,18 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
     }
   };
 
+  // Helper to read page counts for Merge PDF documents asynchronously
+  const updateFilePageCounts = async (pdfFiles: File[]) => {
+    for (const f of pdfFiles) {
+      try {
+        const count = await getPdfPageCount(f);
+        setFilePageCounts((prev) => ({ ...prev, [f.name]: count }));
+      } catch {
+        // Fallback silently if encrypted or failed
+      }
+    }
+  };
+
   // Load files handler with validation
   const handleFiles = async (newFiles: File[]) => {
     setErrorMessage(null);
@@ -175,15 +198,25 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
     setResult(null);
     setPagePreviews([]);
 
-    // Load PDF structure and render page previews
-    await loadPdfPreviews(valid[0]);
+    if (isMerge) {
+      updateFilePageCounts(valid);
+    } else {
+      // Load PDF structure and render page previews
+      await loadPdfPreviews(valid[0]);
+    }
   };
 
   // Append additional files
   const handleAppendFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const added = Array.from(e.target.files);
+      const added = Array.from(e.target.files).filter(
+        (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+      );
       setFiles((prev) => [...prev, ...added]);
+      if (isMerge) {
+        updateFilePageCounts(added);
+      }
+      setResult(null);
     }
   };
 
@@ -240,9 +273,15 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
           break;
 
         case 'split-pdf':
-          setProgress(45);
-          setProgressStatus(`Splitting pages (${pageRangeStr})...`);
-          res = await splitPdf(file, pageRangeStr);
+          if (splitMode === 'all') {
+            setProgress(35);
+            setProgressStatus(`Extracting all ${pageCount} individual pages...`);
+            res = await splitAllPdfPages(file);
+          } else {
+            setProgress(45);
+            setProgressStatus(`Extracting pages (${pageRangeStr})...`);
+            res = await splitPdf(file, pageRangeStr);
+          }
           break;
 
         case 'compress-pdf':
@@ -424,18 +463,21 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                     {files.map((f, idx) => (
                       <div
                         key={`${f.name}-${idx}`}
-                        className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-800 dark:bg-slate-800/60"
+                        className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-2.5 sm:p-3 text-xs dark:border-slate-800 dark:bg-slate-800/60"
                       >
-                        <div className="flex items-center gap-2.5 truncate mr-2">
+                        <div className="flex items-center gap-2.5 truncate mr-2 min-w-0">
                           <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-100 font-bold text-indigo-600 text-[10px] dark:bg-indigo-950 dark:text-indigo-300">
                             {idx + 1}
                           </span>
-                          <span className="truncate font-medium text-slate-900 dark:text-white">
-                            {f.name}
-                          </span>
-                          <span className="text-[11px] text-slate-400 shrink-0 font-mono">
-                            ({formatBytes(f.size)})
-                          </span>
+                          <div className="truncate min-w-0">
+                            <span className="truncate font-semibold text-slate-900 dark:text-white block" title={f.name}>
+                              {f.name}
+                            </span>
+                            <span className="text-[11px] text-slate-400 font-mono">
+                              {filePageCounts[f.name] ? `${filePageCounts[f.name]} ${filePageCounts[f.name] === 1 ? 'page' : 'pages'} · ` : ''}
+                              {formatBytes(f.size)}
+                            </span>
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-1 shrink-0">
@@ -443,8 +485,8 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                             type="button"
                             disabled={idx === 0}
                             onClick={() => moveFile(idx, 'up')}
-                            className="p-1 rounded text-slate-400 hover:text-slate-600 disabled:opacity-30"
-                            title="Move Up"
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 disabled:opacity-25 transition-colors"
+                            title="Move Up in sequence"
                           >
                             <ArrowUp className="h-3.5 w-3.5" />
                           </button>
@@ -452,16 +494,16 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                             type="button"
                             disabled={idx === files.length - 1}
                             onClick={() => moveFile(idx, 'down')}
-                            className="p-1 rounded text-slate-400 hover:text-slate-600 disabled:opacity-30"
-                            title="Move Down"
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 disabled:opacity-25 transition-colors"
+                            title="Move Down in sequence"
                           >
                             <ArrowDown className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
                             onClick={() => removeFile(idx)}
-                            className="p-1 rounded text-rose-400 hover:text-rose-600"
-                            title="Remove"
+                            className="p-1.5 rounded-lg text-rose-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                            title="Remove from merge"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -469,6 +511,13 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                       </div>
                     ))}
                   </div>
+
+                  {files.length < 2 && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-2.5 text-[11px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300 flex items-center gap-1.5">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                      <span>Please add at least 2 PDF documents to combine into a single file.</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -484,24 +533,104 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                     </span>
                   </div>
 
+                  {/* Dual Split Options: Range Mode vs Split All */}
                   <div>
-                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                      Page Range to Extract
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Split Option
                     </label>
-                    <input
-                      type="text"
-                      value={pageRangeStr}
-                      onChange={(e) => {
-                        setPageRangeStr(e.target.value);
-                        setResult(null);
-                      }}
-                      placeholder="e.g. 1-3, 5, 8"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs font-mono text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white"
-                    />
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      Use hyphens for continuous page ranges (e.g. 1-4) or commas for separate pages (e.g. 1, 3, 5).
-                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitMode('range');
+                          setResult(null);
+                        }}
+                        className={`p-2.5 rounded-xl border text-center font-bold transition-all ${
+                          splitMode === 'range'
+                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950/70 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300 bg-white dark:bg-slate-900/60'
+                        }`}
+                      >
+                        Range Mode
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitMode('all');
+                          setResult(null);
+                        }}
+                        className={`p-2.5 rounded-xl border text-center font-bold transition-all ${
+                          splitMode === 'all'
+                            ? 'border-indigo-600 bg-indigo-50 text-indigo-900 dark:bg-indigo-950/70 dark:text-indigo-200 shadow-2xs ring-1 ring-indigo-500'
+                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300 bg-white dark:bg-slate-900/60'
+                        }`}
+                      >
+                        Split All Pages
+                      </button>
+                    </div>
                   </div>
+
+                  {splitMode === 'range' ? (
+                    <div>
+                      <div className="flex justify-between items-center text-xs mb-1">
+                        <label className="font-semibold text-slate-700 dark:text-slate-300">
+                          Page Range to Extract
+                        </label>
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          Max: {pageCount}
+                        </span>
+                      </div>
+                      <input
+                        type="text"
+                        value={pageRangeStr}
+                        onChange={(e) => {
+                          setPageRangeStr(e.target.value);
+                          setResult(null);
+                        }}
+                        placeholder="e.g. 1-3, 5, 7"
+                        className={`w-full rounded-xl border p-2.5 text-xs font-mono text-slate-900 dark:bg-slate-800 dark:text-white focus:outline-none transition-colors ${
+                          !rangeValidation.isValid
+                            ? 'border-rose-500 bg-rose-50/50 dark:bg-rose-950/20 text-rose-900 dark:text-rose-200 focus:border-rose-500'
+                            : 'border-slate-200 bg-white dark:border-slate-700 focus:border-indigo-500'
+                        }`}
+                      />
+                      {!rangeValidation.isValid && (
+                        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400 font-semibold animate-in fade-in duration-150">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>{rangeValidation.error}</span>
+                        </div>
+                      )}
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {[`1-${Math.min(3, pageCount)}`, `1-${Math.min(5, pageCount)}`, `${pageCount}`, `1`].filter((val, i, arr) => arr.indexOf(val) === i).map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => {
+                              setPageRangeStr(preset);
+                              setResult(null);
+                            }}
+                            className={`rounded-lg border px-2 py-1 text-[11px] font-mono transition-all ${
+                              pageRangeStr === preset
+                                ? 'border-indigo-600 bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-300 font-bold'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                            }`}
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1.5">
+                        Extracts specified pages into a clean standalone PDF (<span className="font-mono text-slate-600 dark:text-slate-300">pixora-split.pdf</span>).
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-3.5 text-xs text-indigo-900 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300 space-y-1">
+                      <span className="font-bold block">Split Every Page</span>
+                      <p className="leading-relaxed text-[11px] text-indigo-800/90 dark:text-indigo-300/90">
+                        Separates all {pageCount} pages into individual PDF files (<span className="font-mono">page_1.pdf</span>, <span className="font-mono">page_2.pdf</span>...) packaged in a clean ZIP archive.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -857,18 +986,37 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                 <button
                   type="button"
                   onClick={handleProcess}
-                  disabled={isProcessing || (tool.id === 'extract-pdf-pages' && selectedPages.length === 0)}
+                  disabled={
+                    isProcessing ||
+                    (tool.id === 'merge-pdf' && files.length < 2) ||
+                    (tool.id === 'split-pdf' && splitMode === 'range' && !rangeValidation.isValid) ||
+                    (tool.id === 'extract-pdf-pages' && selectedPages.length === 0)
+                  }
                   className="flex-1 rounded-xl bg-slate-900 dark:bg-indigo-600 px-3.5 sm:px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-xs hover:bg-slate-800 dark:hover:bg-indigo-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 min-h-[44px]"
                 >
                   {isProcessing ? (
                     <>
                       <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
-                      <span>Processing...</span>
+                      <span>
+                        {tool.id === 'split-pdf'
+                          ? 'Splitting PDF...'
+                          : tool.id === 'merge-pdf'
+                          ? 'Merging PDFs...'
+                          : 'Processing...'}
+                      </span>
                     </>
                   ) : (
                     <>
                       <FileCheck className="h-4 w-4 shrink-0" />
-                      <span className="truncate">Execute {tool.name}</span>
+                      <span className="truncate">
+                        {tool.id === 'split-pdf'
+                          ? splitMode === 'all'
+                            ? `Split All ${pageCount} Pages`
+                            : 'Execute Split PDF'
+                          : tool.id === 'merge-pdf'
+                          ? `Merge ${files.length} PDFs`
+                          : `Execute ${tool.name}`}
+                      </span>
                     </>
                   )}
                 </button>
@@ -885,13 +1033,21 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
             {/* Visual Preview & Page Explorer Column */}
             <div className="lg:col-span-7 space-y-4">
               <div className="rounded-3xl border border-slate-200/80 bg-slate-50/70 p-4 sm:p-6 dark:border-slate-800 dark:bg-slate-900/60">
-                <div className="flex items-center justify-between pb-3 text-xs border-b border-slate-200/60 dark:border-slate-800">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">
-                    {result ? 'Completed Document Result' : 'Document Page Explorer'}
+                <div className="flex items-center justify-between pb-3 text-xs border-b border-slate-200/60 dark:border-slate-800 gap-3">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300 shrink-0">
+                    {result ? 'Completed Document Result' : isMerge ? 'Merge Sequence Preview' : 'Document Page Explorer'}
                   </span>
-                  <span className="text-slate-400 font-mono tabular-nums">
-                    {files[0]?.name} ({formatBytes(files.reduce((a, b) => a + b.size, 0))})
-                  </span>
+                  <div className="flex items-center justify-end gap-1.5 text-slate-400 font-mono tabular-nums max-w-[50%] min-w-0">
+                    <span
+                      className="truncate max-w-full overflow-hidden text-ellipsis whitespace-nowrap"
+                      title={isMerge ? `${files.length} PDFs` : files[0]?.name}
+                    >
+                      {isMerge ? `${files.length} PDFs` : files[0]?.name}
+                    </span>
+                    <span className="shrink-0">
+                      ({formatBytes(files.reduce((a, b) => a + b.size, 0))})
+                    </span>
+                  </div>
                 </div>
 
                 {/* Previews Loading state */}
@@ -931,8 +1087,38 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                   </div>
                 )}
 
+                {/* If Merge PDF, show Sequence Overview */}
+                {!result && isMerge && (
+                  <div className="mt-4 space-y-3">
+                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                      The documents will be combined sequentially into a single PDF:
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[500px] overflow-y-auto pr-1">
+                      {files.map((file, idx) => (
+                        <div
+                          key={`merge-seq-${file.name}-${idx}`}
+                          className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 flex items-start gap-3"
+                        >
+                          <div className="h-9 w-9 shrink-0 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 flex items-center justify-center text-indigo-600 dark:text-indigo-400 font-bold text-xs">
+                            #{idx + 1}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="font-semibold text-slate-900 dark:text-white text-xs truncate block" title={file.name}>
+                              {file.name}
+                            </span>
+                            <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                              {filePageCounts[file.name] ? `${filePageCounts[file.name]} ${filePageCounts[file.name] === 1 ? 'page' : 'pages'} · ` : ''}
+                              {formatBytes(file.size)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Visual Page Thumbnails Grid (Rendered via PDF.js) */}
-                {!result && pagePreviews.length > 0 && (
+                {!result && !isMerge && pagePreviews.length > 0 && (
                   <div className="mt-4 max-h-[500px] overflow-y-auto pr-1">
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       {pagePreviews.map((page) => {
@@ -1030,10 +1216,13 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                   <div className="space-y-4 animate-in fade-in duration-200">
                     <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900 text-xs text-left space-y-4">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0 max-w-full sm:max-w-[65%]">
                           <FileCheck className="h-5 w-5 text-emerald-600 shrink-0" />
-                          <div className="min-w-0">
-                            <span className="font-bold text-slate-900 dark:text-white block text-sm truncate max-w-xs">
+                          <div className="min-w-0 flex-1">
+                            <span
+                              className="font-bold text-slate-900 dark:text-white block text-sm truncate max-w-full overflow-hidden text-ellipsis whitespace-nowrap"
+                              title={result.fileName}
+                            >
                               {result.fileName}
                             </span>
                             <span className="text-slate-400 font-mono tabular-nums">
@@ -1049,7 +1238,13 @@ export const PdfToolsView: React.FC<PdfToolsViewProps> = ({ tool }) => {
                           className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white shadow-xs hover:bg-emerald-500 transition-colors min-h-[42px]"
                         >
                           <Download className="h-4 w-4" />
-                          Download Output
+                          {tool.id === 'split-pdf'
+                            ? splitMode === 'all'
+                              ? 'Download Split Pages (ZIP)'
+                              : 'Download Split PDF'
+                            : tool.id === 'merge-pdf'
+                            ? 'Download Merged PDF'
+                            : 'Download Output'}
                         </a>
                       </div>
 

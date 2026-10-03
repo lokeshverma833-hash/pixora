@@ -1,6 +1,28 @@
+import { Capacitor } from '@capacitor/core';
+
 /**
  * Service to interface with secure server-side AI processing endpoints
  */
+
+export const RENDER_BACKEND_URL = 'https://pixora-api-1.onrender.com';
+
+/**
+ * Resolves the API base URL based on runtime environment:
+ * - Native Capacitor app (Android/iOS): https://pixora-api-1.onrender.com
+ * - Web app: Relative path ('')
+ */
+export function getApiBaseUrl(): string {
+  if (Capacitor.isNativePlatform()) {
+    return RENDER_BACKEND_URL;
+  }
+  return '';
+}
+
+export function resolveApiUrl(path: string): string {
+  const base = getApiBaseUrl();
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  return base ? `${base}${cleanPath}` : cleanPath;
+}
 
 export interface AiServerStatus {
   isConfigured: boolean;
@@ -101,7 +123,7 @@ export class AiServiceUnavailableError extends Error {
  */
 export async function checkAiServerStatus(): Promise<AiServerStatus> {
   try {
-    const res = await fetch('/api/ai/status');
+    const res = await fetch(resolveApiUrl('/api/ai/status'));
     if (!res.ok) {
       return {
         isConfigured: false,
@@ -139,8 +161,9 @@ export function fileToBase64(file: File | Blob): Promise<string> {
  */
 async function postAiEndpoint<T>(endpoint: string, payload: any): Promise<T> {
   let res: Response;
+  const targetUrl = resolveApiUrl(endpoint);
   try {
-    res = await fetch(endpoint, {
+    res = await fetch(targetUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

@@ -11,10 +11,19 @@ interface HeroSearchBarProps {
 
 export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, className = '' }) => {
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Debounce search query input (200ms) to filter 35+ tools in real-time
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   // Popular quick tags for 1-click discovery
   const quickTags = [
@@ -26,21 +35,19 @@ export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, clas
     { label: 'Crop Photo', slug: 'crop-image' },
   ];
 
-  // Filter tools based on query
+  // Filter tools based on debounced query
   const filteredTools = React.useMemo(() => {
-    const q = query.toLowerCase().trim();
+    const q = debouncedQuery.toLowerCase().trim();
     if (!q) {
       // When empty and focused, show top recommended tools
       return TOOLS.slice(0, 6);
     }
+    const terms = q.split(/\s+/).filter(Boolean);
     return TOOLS.filter((tool) => {
-      const matchName = tool.name.toLowerCase().includes(q);
-      const matchDesc = tool.description.toLowerCase().includes(q);
-      const matchTags = tool.tags.some((t) => t.toLowerCase().includes(q));
-      const matchCategory = tool.category.toLowerCase().includes(q);
-      return matchName || matchDesc || matchTags || matchCategory;
-    }).slice(0, 8);
-  }, [query]);
+      const toolText = `${tool.name} ${tool.shortDesc || ''} ${tool.description} ${tool.category} ${tool.tags.join(' ')}`.toLowerCase();
+      return toolText.includes(q) || terms.every((t) => toolText.includes(t));
+    });
+  }, [debouncedQuery]);
 
   // Reset selected index when filtered list changes
   useEffect(() => {
@@ -88,17 +95,14 @@ export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, clas
     onSelectTool(tool);
     setIsOpen(false);
     setQuery('');
+    setDebouncedQuery('');
   };
 
-  const handleQuickTagClick = (slug: string) => {
-    const found = TOOLS.find((t) => t.slug === slug || t.id === slug);
-    if (found) {
-      handleSelect(found);
-    } else {
-      setQuery(slug.replace(/-/g, ' '));
-      setIsOpen(true);
-      inputRef.current?.focus();
-    }
+  const handleQuickTagClick = (label: string) => {
+    setQuery(label);
+    setDebouncedQuery(label);
+    setIsOpen(true);
+    inputRef.current?.focus();
   };
 
   return (
@@ -126,7 +130,7 @@ export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, clas
             }}
             onFocus={() => setIsOpen(true)}
             onKeyDown={handleKeyDown}
-            placeholder="Search 35+ tools (e.g. compress, crop, merge pdf, passport photo)..."
+            placeholder="Search 35+ tools (e.g. compress, resize, pdf)..."
             className="w-full bg-transparent px-3 py-2 text-sm sm:text-base font-medium text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none"
           />
 
@@ -135,6 +139,7 @@ export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, clas
             <button
               onClick={() => {
                 setQuery('');
+                setDebouncedQuery('');
                 inputRef.current?.focus();
               }}
               className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors mr-1"
@@ -162,7 +167,7 @@ export const HeroSearchBar: React.FC<HeroSearchBarProps> = ({ onSelectTool, clas
           <button
             key={tag.slug}
             type="button"
-            onClick={() => handleQuickTagClick(tag.slug)}
+            onClick={() => handleQuickTagClick(tag.label)}
             className="inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white/90 px-2.5 py-1 text-xs font-medium text-slate-600 hover:border-indigo-300 hover:bg-indigo-50/50 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300 dark:hover:border-indigo-600/50 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300 shadow-2xs transition-all active:scale-95"
           >
             <span>{tag.label}</span>
